@@ -32,6 +32,7 @@ var folders = []folder{
 type messagesLoadedMsg struct {
 	messages []gmail.MessageSummary
 	err      error
+	tabIdx   int // which folder this response belongs to
 }
 
 // trashDoneMsg signals a trash operation completed.
@@ -40,6 +41,13 @@ type trashDoneMsg struct{ err error }
 // pollTickMsg triggers a background refresh.
 type pollTickMsg struct{}
 
+// folderCache stores per-folder state.
+type folderCache struct {
+	messages []gmail.MessageSummary
+	cursor   int
+	lastSync time.Time
+}
+
 // Model is the inbox Bubble Tea model.
 type Model struct {
 	ctx         context.Context
@@ -47,11 +55,8 @@ type Model struct {
 	width       int
 	height      int
 	tabIdx      int
-	cursor      int
-	messages    []gmail.MessageSummary
-	loading     bool // true only on first load (no cached data yet)
-	syncing     bool // true when fetching in background (cached data visible)
-	lastSync    time.Time
+	cache       map[int]*folderCache // per-folder cache keyed by tabIdx
+	syncing     bool                 // true when fetching in background
 	err         string
 	status      string
 	showPreview bool
@@ -60,10 +65,18 @@ type Model struct {
 // New creates a new inbox model.
 func New(ctx context.Context, client gmail.Client) Model {
 	return Model{
-		ctx:     ctx,
-		client:  client,
-		loading: true,
+		ctx:    ctx,
+		client: client,
+		cache:  make(map[int]*folderCache),
 	}
+}
+
+// fc returns the cache for the active folder, creating it if needed.
+func (m *Model) fc() *folderCache {
+	if m.cache[m.tabIdx] == nil {
+		m.cache[m.tabIdx] = &folderCache{}
+	}
+	return m.cache[m.tabIdx]
 }
 
 // Init loads messages for the default folder and starts polling.
@@ -78,7 +91,8 @@ func (m Model) pollTick() tea.Cmd {
 }
 
 func (m Model) fetchMessages() tea.Cmd {
-	labelID := folders[m.tabIdx].labelID
+	tabIdx := m.tabIdx
+	labelID := folders[tabIdx].labelID
 	query := ""
 	if labelID == "INBOX" {
 		query = "category:primary"
@@ -86,9 +100,9 @@ func (m Model) fetchMessages() tea.Cmd {
 	return func() tea.Msg {
 		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
 		if err != nil {
-			return messagesLoadedMsg{err: err}
+			return messagesLoadedMsg{err: err, tabIdx: tabIdx}
 		}
-		return messagesLoadedMsg{messages: list.Messages}
+		return messagesLoadedMsg{messages: list.Messages, tabIdx: tabIdx}
 	}
 }
 
@@ -107,42 +121,50 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case messagesLoadedMsg:
-		m.loading = false
-		m.syncing = false
-		m.lastSync = time.Now()
+		// Always update the cache for the folder this response belongs to
+		if m.cache[msg.tabIdx] == nil {
+			m.cache[msg.tabIdx] = &folderCache{}
+		}
+		target := m.cache[msg.tabIdx]
+		target.lastSync = time.Now()
+
 		if msg.err != nil {
-			m.err = msg.err.Error()
-		} else {
-			// Preserve cursor position on background refresh
-			prevID := ""
-			if m.cursor < len(m.messages) {
-				prevID = m.messages[m.cursor].ID
+			if msg.tabIdx == m.tabIdx {
+				m.err = msg.err.Error()
+				m.syncing = false
 			}
-			m.messages = msg.messages
-			m.err = ""
-			// Try to restore cursor to the same message
+		} else {
+			// Preserve cursor position
+			prevID := ""
+			if target.cursor < len(target.messages) {
+				prevID = target.messages[target.cursor].ID
+			}
+			target.messages = msg.messages
 			if prevID != "" {
-				for i, msg := range m.messages {
-					if msg.ID == prevID {
-						m.cursor = i
+				for i, m := range target.messages {
+					if m.ID == prevID {
+						target.cursor = i
 						break
 					}
 				}
 			}
-			if m.cursor >= len(m.messages) {
-				m.cursor = 0
+			if target.cursor >= len(target.messages) {
+				target.cursor = 0
+			}
+
+			if msg.tabIdx == m.tabIdx {
+				m.syncing = false
+				m.err = ""
 			}
 		}
 
 	case trashDoneMsg:
 		if msg.err != nil {
 			m.status = "Error trashing message: " + msg.err.Error()
-			// Refresh to restore the list since optimistic removal may be wrong
 			m.syncing = true
 			return m, m.fetchMessages()
 		} else {
 			m.status = "Message trashed."
-			// Background sync to stay in sync with server
 			m.syncing = true
 			return m, m.fetchMessages()
 		}
@@ -155,63 +177,62 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.status = msg.Text
 
 	case tea.MouseMsg:
+		fc := m.fc()
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
-			if m.cursor > 0 {
-				m.cursor--
+			if fc.cursor > 0 {
+				fc.cursor--
 			}
 		case tea.MouseButtonWheelDown:
-			if m.cursor < len(m.messages)-1 {
-				m.cursor++
+			if fc.cursor < len(fc.messages)-1 {
+				fc.cursor++
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionRelease {
-				// tabs(2) + sync(1) = 3 header rows, 1 line per message
-				row := msg.Y - 3
+				row := msg.Y - 3 // tabs(2) + sync(1) = 3 header rows
 				contentHeight := m.height - 5
 				start := 0
-				if m.cursor >= contentHeight {
-					start = m.cursor - contentHeight + 1
+				if fc.cursor >= contentHeight {
+					start = fc.cursor - contentHeight + 1
 				}
 				idx := start + row
-				if idx >= 0 && idx < len(m.messages) {
-					m.cursor = idx
+				if idx >= 0 && idx < len(fc.messages) {
+					fc.cursor = idx
 				}
 			}
 		}
 
 	case tea.KeyMsg:
+		fc := m.fc()
 		switch {
 		case key.Matches(msg, common.Keys.Quit):
 			return m, tea.Quit
 
 		case key.Matches(msg, common.Keys.Up):
-			if m.cursor > 0 {
-				m.cursor--
+			if fc.cursor > 0 {
+				fc.cursor--
 			}
 
 		case key.Matches(msg, common.Keys.Down):
-			if m.cursor < len(m.messages)-1 {
-				m.cursor++
+			if fc.cursor < len(fc.messages)-1 {
+				fc.cursor++
 			}
 
 		case key.Matches(msg, common.Keys.NextTab):
 			m.tabIdx = (m.tabIdx + 1) % len(folders)
-			m.loading = true
-			m.messages = nil
-			m.cursor = 0
+			m.syncing = true
+			m.err = ""
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.PrevTab):
 			m.tabIdx = (m.tabIdx - 1 + len(folders)) % len(folders)
-			m.loading = true
-			m.messages = nil
-			m.cursor = 0
+			m.syncing = true
+			m.err = ""
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.Open):
-			if len(m.messages) > 0 {
-				id := m.messages[m.cursor].ID
+			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				id := fc.messages[fc.cursor].ID
 				return m, func() tea.Msg { return common.FetchMessageMsg{ID: id} }
 			}
 
@@ -227,13 +248,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.showPreview = !m.showPreview
 
 		case key.Matches(msg, common.Keys.Trash):
-			if len(m.messages) > 0 && m.cursor < len(m.messages) {
-				trashed := m.messages[m.cursor]
+			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				trashed := fc.messages[fc.cursor]
 				m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(trashed.Subject, 40))
 				// Optimistically remove from list
-				m.messages = append(m.messages[:m.cursor], m.messages[m.cursor+1:]...)
-				if m.cursor >= len(m.messages) && m.cursor > 0 {
-					m.cursor--
+				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
+				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+					fc.cursor--
 				}
 				return m, m.trashMessage(trashed.ID)
 			}
@@ -249,6 +270,7 @@ func (m Model) View() string {
 		return "Loading..."
 	}
 
+	fc := m.fc()
 	var b strings.Builder
 
 	// 1. Tab bar at top
@@ -265,12 +287,12 @@ func (m Model) View() string {
 
 	// 2. Sync status line
 	syncLine := ""
-	if m.syncing || m.loading {
+	if m.syncing {
 		syncLine = common.SyncingStyle.Render(" Syncing...")
 	} else if m.err != "" {
 		syncLine = common.ErrorStyle.Render(" Error: " + m.err)
-	} else if !m.lastSync.IsZero() {
-		ago := time.Since(m.lastSync).Truncate(time.Second)
+	} else if !fc.lastSync.IsZero() {
+		ago := time.Since(fc.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
 			syncLine = common.SyncedStyle.Render(" Synced")
 		} else if ago < time.Minute {
@@ -279,15 +301,15 @@ func (m Model) View() string {
 			syncLine = common.MutedStyle.Render(fmt.Sprintf(" Synced %dm ago", int(ago.Minutes())))
 		}
 	}
-	if len(m.messages) > 0 {
-		syncLine += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(m.messages)))
+	if len(fc.messages) > 0 {
+		syncLine += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(fc.messages)))
 	}
 	if m.status != "" {
 		syncLine += "  " + common.MutedStyle.Render(m.status)
 	}
 	b.WriteString(syncLine + "\n")
 
-	// 3. Keybinds bar (will be appended at the bottom)
+	// 3. Keybinds bar (appended at the bottom)
 	keybinds := common.StatusBar.Width(m.width).Render(
 		" j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit")
 
@@ -297,19 +319,13 @@ func (m Model) View() string {
 		contentHeight = 1
 	}
 
-	// 4. Message list
-	if len(m.messages) == 0 && !m.loading {
-		b.WriteString("\n  No messages.\n")
-		// Pad remaining space
-		for i := 0; i < contentHeight-2; i++ {
-			b.WriteString("\n")
+	// 4. Message list — always show cached messages, even while syncing
+	if len(fc.messages) == 0 {
+		if m.syncing {
+			b.WriteString("\n  Loading messages...\n")
+		} else {
+			b.WriteString("\n  No messages.\n")
 		}
-		b.WriteString(keybinds)
-		return b.String()
-	}
-
-	if len(m.messages) == 0 && m.loading {
-		b.WriteString("\n  Loading messages...\n")
 		for i := 0; i < contentHeight-2; i++ {
 			b.WriteString("\n")
 		}
@@ -328,18 +344,18 @@ func (m Model) View() string {
 	// Build message list
 	var listLines []string
 	start := 0
-	if m.cursor >= visibleRows {
-		start = m.cursor - visibleRows + 1
+	if fc.cursor >= visibleRows {
+		start = fc.cursor - visibleRows + 1
 	}
 	end := start + visibleRows
-	if end > len(m.messages) {
-		end = len(m.messages)
+	if end > len(fc.messages) {
+		end = len(fc.messages)
 	}
 
 	for i := start; i < end; i++ {
-		msg := m.messages[i]
+		msg := fc.messages[i]
 		line := formatMessageLine(msg, listWidth-4)
-		if i == m.cursor {
+		if i == fc.cursor {
 			line = common.SelectedMessage.Width(listWidth - 2).Render(line)
 		} else if msg.Unread {
 			line = common.UnreadMessage.Width(listWidth - 2).Render(line)
@@ -356,8 +372,8 @@ func (m Model) View() string {
 	if m.showPreview {
 		// Build preview pane
 		var previewLines []string
-		if m.cursor < len(m.messages) {
-			cur := m.messages[m.cursor]
+		if fc.cursor < len(fc.messages) {
+			cur := fc.messages[fc.cursor]
 			previewLines = buildPreview(cur, previewWidth, contentHeight)
 		}
 		for len(previewLines) < contentHeight {
