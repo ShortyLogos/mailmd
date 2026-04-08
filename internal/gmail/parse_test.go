@@ -72,6 +72,27 @@ func TestGetHeader(t *testing.T) {
 	}
 }
 
+func TestParseDateFallbackToInternalDate(t *testing.T) {
+	msg := &gapi.Message{
+		Id:           "msg-nodate",
+		InternalDate: 1712592000000, // 2024-04-08T16:00:00Z in millis
+		Payload: &gapi.MessagePart{
+			Headers: []*gapi.MessagePartHeader{
+				{Name: "From", Value: "test@example.com"},
+				{Name: "Subject", Value: "No date header"},
+			},
+		},
+		LabelIds: []string{"INBOX"},
+	}
+	summary := parseMessageSummary(msg)
+	if summary.Date.IsZero() {
+		t.Error("expected date from InternalDate, got zero")
+	}
+	if summary.Date.Year() != 2024 {
+		t.Errorf("expected year 2024, got %d", summary.Date.Year())
+	}
+}
+
 func TestParseMultipartBody(t *testing.T) {
 	msg := &gapi.Message{
 		Id: "msg-2",

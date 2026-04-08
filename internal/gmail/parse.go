@@ -2,6 +2,7 @@ package gmail
 
 import (
 	"encoding/base64"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -10,7 +11,7 @@ import (
 
 func parseMessageSummary(msg *gapi.Message) MessageSummary {
 	headers := msg.Payload.Headers
-	date, _ := time.Parse(time.RFC1123Z, getHeader(headers, "Date"))
+	date := parseDate(getHeader(headers, "Date"), msg.InternalDate)
 	unread := false
 	for _, l := range msg.LabelIds {
 		if l == "UNREAD" {
@@ -30,7 +31,7 @@ func parseMessageSummary(msg *gapi.Message) MessageSummary {
 
 func parseMessage(msg *gapi.Message) *Message {
 	headers := msg.Payload.Headers
-	date, _ := time.Parse(time.RFC1123Z, getHeader(headers, "Date"))
+	date := parseDate(getHeader(headers, "Date"), msg.InternalDate)
 	plain, html := extractBodies(msg.Payload)
 	return &Message{
 		ID:       msg.Id,
@@ -76,6 +77,21 @@ func decodeBody(data string) string {
 		}
 	}
 	return string(decoded)
+}
+
+// parseDate tries the standard mail.ParseDate (handles RFC 2822 and variants),
+// then falls back to Gmail's InternalDate (Unix millis).
+func parseDate(header string, internalDate int64) time.Time {
+	if header != "" {
+		if t, err := mail.ParseDate(header); err == nil {
+			return t
+		}
+	}
+	// Fallback to InternalDate (milliseconds since epoch)
+	if internalDate > 0 {
+		return time.UnixMilli(internalDate)
+	}
+	return time.Time{}
 }
 
 func getHeader(headers []*gapi.MessagePartHeader, name string) string {

@@ -166,12 +166,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionRelease {
-				// Calculate which message was clicked (account for tab bar)
-				row := msg.Y - 2 // subtract tab bar height
-				start := 0
+				// Calculate which message was clicked (status bar + tab bar = 3 header rows, 2 lines per message)
+				row := (msg.Y - 3) / 2 // subtract header, divide by lines per row
 				contentHeight := m.height - 3
-				if m.cursor >= contentHeight {
-					start = m.cursor - contentHeight + 1
+				visibleRows := contentHeight / 2
+				start := 0
+				if m.cursor >= visibleRows {
+					start = m.cursor - visibleRows + 1
 				}
 				idx := start + row
 				if idx >= 0 && idx < len(m.messages) {
@@ -249,6 +250,14 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
+	rowSep := lipgloss.NewStyle().Foreground(lipgloss.Color("#2D3748"))
+
+	// Status bar at top
+	statusText := m.status
+	if statusText == "" {
+		statusText = " j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit"
+	}
+	b.WriteString(common.StatusBar.Width(m.width).Render(statusText) + "\n")
 
 	// Tab bar with sync indicator
 	tabs := make([]string, len(folders))
@@ -274,10 +283,11 @@ func (m Model) View() string {
 		}
 	}
 
-	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, "") + syncIndicator)
+	countInfo := common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(m.messages)))
+	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, "") + syncIndicator + countInfo)
 	b.WriteString(tabRow + "\n")
 
-	// Calculate content area height (subtract tabbar, statusbar)
+	// Calculate content area height (subtract status bar, tab bar, bottom padding)
 	contentHeight := m.height - 3
 
 	if m.loading {
@@ -294,19 +304,22 @@ func (m Model) View() string {
 	}
 
 	// Layout: full list or split pane depending on preview toggle
+	// Each message takes 2 lines: content + separator
+	linesPerRow := 2
 	listWidth := m.width
 	if m.showPreview {
 		listWidth = m.width * 6 / 10
 	}
 	previewWidth := m.width - listWidth - 1
+	visibleRows := contentHeight / linesPerRow
 
 	// Build message list
 	var listLines []string
 	start := 0
-	if m.cursor >= contentHeight {
-		start = m.cursor - contentHeight + 1
+	if m.cursor >= visibleRows {
+		start = m.cursor - visibleRows + 1
 	}
-	end := start + contentHeight
+	end := start + visibleRows
 	if end > len(m.messages) {
 		end = len(m.messages)
 	}
@@ -322,10 +335,13 @@ func (m Model) View() string {
 			line = common.ReadMessage.Width(listWidth - 2).Render(line)
 		}
 		listLines = append(listLines, line)
+		// Add subtle row separator
+		sep := rowSep.Render(strings.Repeat("─", listWidth))
+		listLines = append(listLines, sep)
 	}
 	// Pad to fill content area
 	for len(listLines) < contentHeight {
-		listLines = append(listLines, strings.Repeat(" ", listWidth))
+		listLines = append(listLines, "")
 	}
 
 	if m.showPreview {
@@ -361,14 +377,6 @@ func (m Model) View() string {
 			}
 		}
 	}
-
-	// Status bar
-	statusText := m.status
-	if statusText == "" {
-		statusText = fmt.Sprintf(" %d messages  [%s]  j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit",
-			len(m.messages), folders[m.tabIdx].name)
-	}
-	b.WriteString(common.StatusBar.Width(m.width).Render(statusText))
 
 	return b.String()
 }
