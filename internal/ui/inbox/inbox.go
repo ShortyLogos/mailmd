@@ -583,7 +583,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 		} else if msg.Date.Year() == now.Year() {
 			dateStr = msg.Date.Format("Jan 02")
 		} else {
-			dateStr = msg.Date.Format("01/2006")
+			dateStr = msg.Date.Format("Jan 06")
 		}
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
