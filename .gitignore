@@ -1,0 +1,4 @@
+mailmd
+*.exe
+.DS_Store
+dist/
