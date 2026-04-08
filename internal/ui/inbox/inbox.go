@@ -12,6 +12,7 @@ import (
 	"github.com/deric/mailmd/internal/gmail"
 	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
+	rw "github.com/mattn/go-runewidth"
 )
 
 // folder represents a Gmail label/folder tab.
@@ -332,7 +333,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 		return ""
 	}
 
-	// Fixed-width columns: unread(2) + from(fromW) + separator(3) + subject(flex) + separator(2) + date(dateW)
+	// Column widths: unread(2) + from(fromW) + gap(2) + subject(flex) + gap(1) + date(dateW)
 	dateW := 6
 	fromW := width / 4
 	if fromW > 24 {
@@ -353,10 +354,10 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	if idx := strings.Index(from, "<"); idx > 1 {
 		from = strings.TrimSpace(from[:idx])
 	}
-	from = truncate(from, fromW)
-	from = fmt.Sprintf("%-*s", fromW, from)
+	from = runewidthTruncate(from, fromW)
+	from = runewidthPadRight(from, fromW)
 
-	// Date — always right-aligned, fixed width
+	// Date — always right-aligned, fixed width (ASCII only, so fmt is fine)
 	dateStr := ""
 	if !msg.Date.IsZero() {
 		now := time.Now()
@@ -371,7 +372,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
 	// Subject — fills remaining space
-	subjectW := width - 2 - fromW - 3 - 2 - dateW
+	subjectW := width - 2 - fromW - 2 - 1 - dateW
 	if subjectW < 0 {
 		subjectW = 0
 	}
@@ -379,10 +380,10 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	if subject == "" {
 		subject = "(no subject)"
 	}
-	subject = truncate(subject, subjectW)
-	subject = fmt.Sprintf("%-*s", subjectW, subject)
+	subject = runewidthTruncate(subject, subjectW)
+	subject = runewidthPadRight(subject, subjectW)
 
-	return fmt.Sprintf("%s %s  %s  %s", unread, from, subject, dateStr)
+	return fmt.Sprintf("%s %s  %s %s", unread, from, subject, dateStr)
 }
 
 func buildPreview(msg gmail.MessageSummary, width, height int) []string {
@@ -411,12 +412,27 @@ func buildPreview(msg gmail.MessageSummary, width, height int) []string {
 	return lines
 }
 
+// runewidthTruncate truncates a string to fit within the given display width,
+// accounting for multi-byte characters and wide glyphs (CJK, emojis).
+func runewidthTruncate(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	return rw.Truncate(s, width, "…")
+}
+
+// runewidthPadRight pads a string with spaces to reach the given display width.
+func runewidthPadRight(s string, width int) string {
+	sw := rw.StringWidth(s)
+	if sw >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-sw)
+}
+
 func truncate(s string, width int) string {
 	if width <= 0 {
 		return ""
 	}
-	if len(s) > width {
-		return s[:width-1] + "…"
-	}
-	return s
+	return rw.Truncate(s, width, "…")
 }
