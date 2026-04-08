@@ -116,6 +116,32 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case common.StatusMsg:
 		m.status = msg.Text
 
+	case tea.MouseMsg:
+		switch msg.Button {
+		case tea.MouseButtonWheelUp:
+			if m.cursor > 0 {
+				m.cursor--
+			}
+		case tea.MouseButtonWheelDown:
+			if m.cursor < len(m.messages)-1 {
+				m.cursor++
+			}
+		case tea.MouseButtonLeft:
+			if msg.Action == tea.MouseActionRelease {
+				// Calculate which message was clicked (account for tab bar)
+				row := msg.Y - 2 // subtract tab bar height
+				start := 0
+				contentHeight := m.height - 3
+				if m.cursor >= contentHeight {
+					start = m.cursor - contentHeight + 1
+				}
+				idx := start + row
+				if idx >= 0 && idx < len(m.messages) {
+					m.cursor = idx
+				}
+			}
+		}
+
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, common.Keys.Quit):

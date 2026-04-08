@@ -77,6 +77,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.height = msg.Height
 		m.initViewport()
 
+	case tea.MouseMsg:
+		var cmd tea.Cmd
+		m.viewport, cmd = m.viewport.Update(msg)
+		return m, cmd
+
 	case tea.KeyMsg:
 		switch {
 		case key.Matches(msg, common.Keys.Back):

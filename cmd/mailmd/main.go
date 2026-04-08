@@ -61,7 +61,7 @@ func run() error {
 		return fmt.Errorf("gmail client: %w", err)
 	}
 
-	p := tea.NewProgram(ui.New(ctx, client, cfg), tea.WithAltScreen())
+	p := tea.NewProgram(ui.New(ctx, client, cfg), tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err = p.Run()
 	return err
 }
