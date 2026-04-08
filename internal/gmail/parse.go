@@ -2,6 +2,7 @@ package gmail
 
 import (
 	"encoding/base64"
+	"html"
 	"net/mail"
 	"strings"
 	"time"
@@ -23,7 +24,7 @@ func parseMessageSummary(msg *gapi.Message) MessageSummary {
 		ID:      msg.Id,
 		From:    getHeader(headers, "From"),
 		Subject: getHeader(headers, "Subject"),
-		Snippet: msg.Snippet,
+		Snippet: html.UnescapeString(msg.Snippet),
 		Date:    date,
 		Unread:  unread,
 	}

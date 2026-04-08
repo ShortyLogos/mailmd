@@ -498,13 +498,15 @@ func (m Model) View() string {
 
 	for i := start; i < end; i++ {
 		msg := fc.messages[i]
-		line := formatMessageLine(msg, listWidth-4)
+		line := formatMessageLine(msg, listWidth-2)
+		// Pad line to exact width with spaces, then apply style (no lipgloss Width/Padding)
+		line = runewidthPadRight(line, listWidth-2)
 		if i == fc.cursor {
-			line = common.SelectedMessage.Width(listWidth - 2).Render(line)
+			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if msg.Unread {
-			line = common.UnreadMessage.Width(listWidth - 2).Render(line)
+			line = common.UnreadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else {
-			line = common.ReadMessage.Width(listWidth - 2).Render(line)
+			line = common.ReadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		}
 		listLines = append(listLines, line)
 	}
