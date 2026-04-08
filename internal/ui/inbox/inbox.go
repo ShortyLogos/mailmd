@@ -38,16 +38,17 @@ type trashDoneMsg struct{ err error }
 
 // Model is the inbox Bubble Tea model.
 type Model struct {
-	ctx     context.Context
-	client  gmail.Client
-	width   int
-	height  int
-	tabIdx  int
-	cursor  int
-	messages []gmail.MessageSummary
-	loading bool
-	err     string
-	status  string
+	ctx         context.Context
+	client      gmail.Client
+	width       int
+	height      int
+	tabIdx      int
+	cursor      int
+	messages    []gmail.MessageSummary
+	loading     bool
+	err         string
+	status      string
+	showPreview bool
 }
 
 // New creates a new inbox model.
@@ -150,6 +151,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			tmpl := markdown.ComposeTemplate()
 			return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
 
+		case key.Matches(msg, common.Keys.Preview):
+			m.showPreview = !m.showPreview
+
 		case key.Matches(msg, common.Keys.Trash):
 			if len(m.messages) > 0 {
 				id := m.messages[m.cursor].ID
@@ -196,8 +200,11 @@ func (m Model) View() string {
 		return b.String()
 	}
 
-	// Split pane: list (left ~60%) + preview (right ~40%)
-	listWidth := m.width * 6 / 10
+	// Layout: full list or split pane depending on preview toggle
+	listWidth := m.width
+	if m.showPreview {
+		listWidth = m.width * 6 / 10
+	}
 	previewWidth := m.width - listWidth - 1
 
 	// Build message list
@@ -228,34 +235,44 @@ func (m Model) View() string {
 		listLines = append(listLines, strings.Repeat(" ", listWidth))
 	}
 
-	// Build preview pane
-	var previewLines []string
-	if m.cursor < len(m.messages) {
-		cur := m.messages[m.cursor]
-		previewLines = buildPreview(cur, previewWidth, contentHeight)
-	}
-	for len(previewLines) < contentHeight {
-		previewLines = append(previewLines, "")
-	}
+	if m.showPreview {
+		// Build preview pane
+		var previewLines []string
+		if m.cursor < len(m.messages) {
+			cur := m.messages[m.cursor]
+			previewLines = buildPreview(cur, previewWidth, contentHeight)
+		}
+		for len(previewLines) < contentHeight {
+			previewLines = append(previewLines, "")
+		}
 
-	// Combine side by side
-	divider := lipgloss.NewStyle().Foreground(common.Secondary)
-	for i := 0; i < contentHeight; i++ {
-		left := ""
-		right := ""
-		if i < len(listLines) {
-			left = listLines[i]
+		// Combine side by side
+		divider := lipgloss.NewStyle().Foreground(common.Secondary)
+		for i := 0; i < contentHeight; i++ {
+			left := ""
+			right := ""
+			if i < len(listLines) {
+				left = listLines[i]
+			}
+			if i < len(previewLines) {
+				right = previewLines[i]
+			}
+			b.WriteString(left + divider.Render("│") + right + "\n")
 		}
-		if i < len(previewLines) {
-			right = previewLines[i]
+	} else {
+		for i := 0; i < contentHeight; i++ {
+			if i < len(listLines) {
+				b.WriteString(listLines[i] + "\n")
+			} else {
+				b.WriteString("\n")
+			}
 		}
-		b.WriteString(left + divider.Render("│") + right + "\n")
 	}
 
 	// Status bar
 	statusText := m.status
 	if statusText == "" {
-		statusText = fmt.Sprintf(" %d messages  [%s]  j/k=nav  o=open  c=compose  d=trash  tab=folder  q=quit",
+		statusText = fmt.Sprintf(" %d messages  [%s]  j/k=nav  o=open  c=compose  d=trash  p=preview  tab=folder  q=quit",
 			len(m.messages), folders[m.tabIdx].name)
 	}
 	b.WriteString(common.StatusBar.Width(m.width).Render(statusText))
