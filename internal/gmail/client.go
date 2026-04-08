@@ -63,14 +63,48 @@ func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query st
 	if err != nil {
 		return nil, err
 	}
-	messages := make([]MessageSummary, 0, len(resp.Messages))
-	for _, m := range resp.Messages {
-		msg, err := c.svc.Users.Messages.Get(c.user, m.Id).Format("metadata").MetadataHeaders("From", "Subject", "Date").Context(ctx).Do()
-		if err != nil {
-			continue
-		}
-		messages = append(messages, parseMessageSummary(msg))
+
+	// Fetch message metadata concurrently
+	type result struct {
+		idx     int
+		summary MessageSummary
+		err     error
 	}
+
+	results := make(chan result, len(resp.Messages))
+	for i, m := range resp.Messages {
+		go func(idx int, id string) {
+			msg, err := c.svc.Users.Messages.Get(c.user, id).
+				Format("metadata").
+				MetadataHeaders("From", "Subject", "Date").
+				Context(ctx).
+				Do()
+			if err != nil {
+				results <- result{idx: idx, err: err}
+				return
+			}
+			results <- result{idx: idx, summary: parseMessageSummary(msg)}
+		}(i, m.Id)
+	}
+
+	// Collect results in original order
+	ordered := make([]MessageSummary, len(resp.Messages))
+	valid := make([]bool, len(resp.Messages))
+	for range resp.Messages {
+		r := <-results
+		if r.err == nil {
+			ordered[r.idx] = r.summary
+			valid[r.idx] = true
+		}
+	}
+
+	messages := make([]MessageSummary, 0, len(resp.Messages))
+	for i, s := range ordered {
+		if valid[i] {
+			messages = append(messages, s)
+		}
+	}
+
 	return &MessageList{Messages: messages, NextPageToken: resp.NextPageToken}, nil
 }
 
