@@ -49,7 +49,9 @@ type Model struct {
 	tabIdx      int
 	cursor      int
 	messages    []gmail.MessageSummary
-	loading     bool
+	loading     bool // true only on first load (no cached data yet)
+	syncing     bool // true when fetching in background (cached data visible)
+	lastSync    time.Time
 	err         string
 	status      string
 	showPreview bool
@@ -106,12 +108,30 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case messagesLoadedMsg:
 		m.loading = false
+		m.syncing = false
+		m.lastSync = time.Now()
 		if msg.err != nil {
 			m.err = msg.err.Error()
 		} else {
+			// Preserve cursor position on background refresh
+			prevID := ""
+			if m.cursor < len(m.messages) {
+				prevID = m.messages[m.cursor].ID
+			}
 			m.messages = msg.messages
-			m.cursor = 0
 			m.err = ""
+			// Try to restore cursor to the same message
+			if prevID != "" {
+				for i, msg := range m.messages {
+					if msg.ID == prevID {
+						m.cursor = i
+						break
+					}
+				}
+			}
+			if m.cursor >= len(m.messages) {
+				m.cursor = 0
+			}
 		}
 
 	case trashDoneMsg:
@@ -124,6 +144,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case pollTickMsg:
+		m.syncing = true
 		return m, tea.Batch(m.fetchMessages(), m.pollTick())
 
 	case common.StatusMsg:
@@ -195,8 +216,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
 
 		case key.Matches(msg, common.Keys.Refresh):
-			m.loading = true
-			m.status = "Refreshing..."
+			m.syncing = true
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.Preview):
@@ -220,7 +240,7 @@ func (m Model) View() string {
 
 	var b strings.Builder
 
-	// Tab bar
+	// Tab bar with sync indicator
 	tabs := make([]string, len(folders))
 	for i, f := range folders {
 		if i == m.tabIdx {
@@ -229,7 +249,22 @@ func (m Model) View() string {
 			tabs[i] = common.InactiveTab.Render(f.name)
 		}
 	}
-	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
+
+	syncIndicator := ""
+	if m.syncing {
+		syncIndicator = common.SyncingStyle.Render("  Syncing...")
+	} else if !m.lastSync.IsZero() {
+		ago := time.Since(m.lastSync).Truncate(time.Second)
+		if ago < 5*time.Second {
+			syncIndicator = common.SyncedStyle.Render("  Synced")
+		} else if ago < time.Minute {
+			syncIndicator = common.SyncedStyle.Render(fmt.Sprintf("  Synced %ds ago", int(ago.Seconds())))
+		} else {
+			syncIndicator = common.MutedStyle.Render(fmt.Sprintf("  Synced %dm ago", int(ago.Minutes())))
+		}
+	}
+
+	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, "") + syncIndicator)
 	b.WriteString(tabRow + "\n")
 
 	// Calculate content area height (subtract tabbar, statusbar)

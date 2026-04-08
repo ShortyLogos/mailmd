@@ -21,4 +21,8 @@ var (
 	ReaderHeader = lipgloss.NewStyle().Bold(true).Padding(0, 0, 1, 0)
 	ErrorStyle   = lipgloss.NewStyle().Foreground(Danger).Bold(true)
 	Title        = lipgloss.NewStyle().Bold(true).Foreground(Primary)
+
+	SyncingStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#F59E0B")).Italic(true)
+	SyncedStyle  = lipgloss.NewStyle().Foreground(Accent)
+	MutedStyle   = lipgloss.NewStyle().Foreground(Muted)
 )
