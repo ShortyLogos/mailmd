@@ -285,39 +285,61 @@ func (m Model) View() string {
 }
 
 func formatMessageLine(msg gmail.MessageSummary, width int) string {
-	from := msg.From
-	if len(from) > 20 {
-		from = from[:18] + ".."
+	if width < 10 {
+		return ""
 	}
-	from = fmt.Sprintf("%-20s", from)
 
+	// Fixed-width columns: unread(2) + from(fromW) + separator(3) + subject(flex) + separator(2) + date(dateW)
+	dateW := 6
+	fromW := width / 4
+	if fromW > 24 {
+		fromW = 24
+	}
+	if fromW < 12 {
+		fromW = 12
+	}
+
+	// Unread indicator
+	unread := " "
+	if msg.Unread {
+		unread = "●"
+	}
+
+	// From — extract display name if possible
+	from := msg.From
+	if idx := strings.Index(from, "<"); idx > 1 {
+		from = strings.TrimSpace(from[:idx])
+	}
+	from = truncate(from, fromW)
+	from = fmt.Sprintf("%-*s", fromW, from)
+
+	// Date — always right-aligned, fixed width
 	dateStr := ""
 	if !msg.Date.IsZero() {
 		now := time.Now()
 		if msg.Date.Year() == now.Year() && msg.Date.YearDay() == now.YearDay() {
 			dateStr = msg.Date.Format("15:04")
-		} else {
+		} else if msg.Date.Year() == now.Year() {
 			dateStr = msg.Date.Format("Jan 02")
+		} else {
+			dateStr = msg.Date.Format("01/2006")
 		}
 	}
-	dateStr = fmt.Sprintf("%6s", dateStr)
+	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
-	subjectWidth := width - 20 - 6 - 2
-	if subjectWidth < 0 {
-		subjectWidth = 0
+	// Subject — fills remaining space
+	subjectW := width - 2 - fromW - 3 - 2 - dateW
+	if subjectW < 0 {
+		subjectW = 0
 	}
 	subject := msg.Subject
-	if len(subject) > subjectWidth {
-		subject = subject[:subjectWidth]
+	if subject == "" {
+		subject = "(no subject)"
 	}
-	subject = fmt.Sprintf("%-*s", subjectWidth, subject)
+	subject = truncate(subject, subjectW)
+	subject = fmt.Sprintf("%-*s", subjectW, subject)
 
-	unreadMark := " "
-	if msg.Unread {
-		unreadMark = "●"
-	}
-
-	return fmt.Sprintf("%s %s %s %s", unreadMark, from, subject, dateStr)
+	return fmt.Sprintf("%s %s  %s  %s", unread, from, subject, dateStr)
 }
 
 func buildPreview(msg gmail.MessageSummary, width, height int) []string {
