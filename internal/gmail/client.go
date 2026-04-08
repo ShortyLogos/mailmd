@@ -14,7 +14,7 @@ import (
 // Client is the Gmail API client interface.
 type Client interface {
 	ListLabels(ctx context.Context) ([]Label, error)
-	ListMessages(ctx context.Context, labelID string, pageToken string) (*MessageList, error)
+	ListMessages(ctx context.Context, labelID string, query string, pageToken string) (*MessageList, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	SendMessage(ctx context.Context, to, subject, htmlBody, plainBody string) error
 	ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error
@@ -51,8 +51,11 @@ func (c *gmailClient) ListLabels(ctx context.Context) ([]Label, error) {
 	return labels, nil
 }
 
-func (c *gmailClient) ListMessages(ctx context.Context, labelID string, pageToken string) (*MessageList, error) {
+func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query string, pageToken string) (*MessageList, error) {
 	req := c.svc.Users.Messages.List(c.user).LabelIds(labelID).MaxResults(50).Context(ctx)
+	if query != "" {
+		req = req.Q(query)
+	}
 	if pageToken != "" {
 		req = req.PageToken(pageToken)
 	}

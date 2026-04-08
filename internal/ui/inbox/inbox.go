@@ -67,8 +67,12 @@ func (m Model) Init() tea.Cmd {
 
 func (m Model) fetchMessages() tea.Cmd {
 	labelID := folders[m.tabIdx].labelID
+	query := ""
+	if labelID == "INBOX" {
+		query = "category:primary"
+	}
 	return func() tea.Msg {
-		list, err := m.client.ListMessages(m.ctx, labelID, "")
+		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
 		if err != nil {
 			return messagesLoadedMsg{err: err}
 		}
