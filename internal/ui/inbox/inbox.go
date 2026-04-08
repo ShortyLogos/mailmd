@@ -137,9 +137,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case trashDoneMsg:
 		if msg.err != nil {
 			m.status = "Error trashing message: " + msg.err.Error()
+			// Refresh to restore the list since optimistic removal may be wrong
+			m.syncing = true
+			return m, m.fetchMessages()
 		} else {
-			m.status = "Message moved to Trash."
-			m.loading = true
+			m.status = "Message trashed."
+			// Background sync to stay in sync with server
+			m.syncing = true
 			return m, m.fetchMessages()
 		}
 
@@ -223,9 +227,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.showPreview = !m.showPreview
 
 		case key.Matches(msg, common.Keys.Trash):
-			if len(m.messages) > 0 {
-				id := m.messages[m.cursor].ID
-				return m, m.trashMessage(id)
+			if len(m.messages) > 0 && m.cursor < len(m.messages) {
+				trashed := m.messages[m.cursor]
+				m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(trashed.Subject, 40))
+				// Optimistically remove from list
+				m.messages = append(m.messages[:m.cursor], m.messages[m.cursor+1:]...)
+				if m.cursor >= len(m.messages) && m.cursor > 0 {
+					m.cursor--
+				}
+				return m, m.trashMessage(trashed.ID)
 			}
 		}
 	}
