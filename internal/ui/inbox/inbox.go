@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/deric/mailmd/internal/gmail"
@@ -32,7 +33,8 @@ var folders = []folder{
 type messagesLoadedMsg struct {
 	messages []gmail.MessageSummary
 	err      error
-	tabIdx   int // which folder this response belongs to
+	tabIdx   int    // which folder this response belongs to
+	query    string // search query this response belongs to
 }
 
 // trashDoneMsg signals a trash operation completed.
@@ -60,19 +62,33 @@ type Model struct {
 	err         string
 	status      string
 	showPreview bool
+
+	// Search
+	searching   bool             // true when search input is visible
+	searchInput textinput.Model
+	searchQuery string           // active search query (empty = no filter)
+	searchCache *folderCache     // separate cache for search results
 }
 
 // New creates a new inbox model.
 func New(ctx context.Context, client gmail.Client) Model {
+	ti := textinput.New()
+	ti.Placeholder = "Search Gmail (from:, subject:, has:attachment, ...)"
+	ti.CharLimit = 256
+
 	return Model{
-		ctx:    ctx,
-		client: client,
-		cache:  make(map[int]*folderCache),
+		ctx:         ctx,
+		client:      client,
+		cache:       make(map[int]*folderCache),
+		searchInput: ti,
 	}
 }
 
-// fc returns the cache for the active folder, creating it if needed.
+// fc returns the active message cache — search results if searching, otherwise folder cache.
 func (m *Model) fc() *folderCache {
+	if m.searchQuery != "" && m.searchCache != nil {
+		return m.searchCache
+	}
 	if m.cache[m.tabIdx] == nil {
 		m.cache[m.tabIdx] = &folderCache{}
 	}
@@ -106,6 +122,16 @@ func (m Model) fetchMessages() tea.Cmd {
 	}
 }
 
+func (m Model) fetchSearch(query string) tea.Cmd {
+	return func() tea.Msg {
+		list, err := m.client.ListMessages(m.ctx, "INBOX", query, "")
+		if err != nil {
+			return messagesLoadedMsg{err: err, tabIdx: -1, query: query}
+		}
+		return messagesLoadedMsg{messages: list.Messages, tabIdx: -1, query: query}
+	}
+}
+
 func (m Model) trashMessage(id string) tea.Cmd {
 	return func() tea.Msg {
 		err := m.client.TrashMessage(m.ctx, id)
@@ -121,7 +147,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.height = msg.Height
 
 	case messagesLoadedMsg:
-		// Always update the cache for the folder this response belongs to
+		if msg.tabIdx == -1 {
+			// Search result
+			if m.searchCache == nil {
+				m.searchCache = &folderCache{}
+			}
+			m.searchCache.lastSync = time.Now()
+			if msg.err != nil {
+				m.err = msg.err.Error()
+			} else {
+				m.searchCache.messages = msg.messages
+				m.searchCache.cursor = 0
+				m.err = ""
+			}
+			m.syncing = false
+			return m, nil
+		}
+
+		// Folder result — update cache for that folder
 		if m.cache[msg.tabIdx] == nil {
 			m.cache[msg.tabIdx] = &folderCache{}
 		}
@@ -134,7 +177,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.syncing = false
 			}
 		} else {
-			// Preserve cursor position
 			prevID := ""
 			if target.cursor < len(target.messages) {
 				prevID = target.messages[target.cursor].ID
@@ -151,7 +193,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if target.cursor >= len(target.messages) {
 				target.cursor = 0
 			}
-
 			if msg.tabIdx == m.tabIdx {
 				m.syncing = false
 				m.err = ""
@@ -161,22 +202,26 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case trashDoneMsg:
 		if msg.err != nil {
 			m.status = "Error trashing message: " + msg.err.Error()
-			m.syncing = true
-			return m, m.fetchMessages()
 		} else {
 			m.status = "Message trashed."
-			m.syncing = true
-			return m, m.fetchMessages()
 		}
+		m.syncing = true
+		return m, m.fetchMessages()
 
 	case pollTickMsg:
-		m.syncing = true
-		return m, tea.Batch(m.fetchMessages(), m.pollTick())
+		if m.searchQuery == "" {
+			m.syncing = true
+			return m, tea.Batch(m.fetchMessages(), m.pollTick())
+		}
+		return m, m.pollTick() // don't poll while searching
 
 	case common.StatusMsg:
 		m.status = msg.Text
 
 	case tea.MouseMsg:
+		if m.searching {
+			return m, nil
+		}
 		fc := m.fc()
 		switch msg.Button {
 		case tea.MouseButtonWheelUp:
@@ -189,8 +234,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionRelease {
-				row := msg.Y - 3 // tabs(2) + sync(1) = 3 header rows
-				contentHeight := m.height - 5
+				headerRows := 4 // tabs(2) + sync(1) + padding(1)
+				if m.searching || m.searchQuery != "" {
+					headerRows = 5 // + search bar
+				}
+				row := msg.Y - headerRows
+				contentHeight := m.contentHeight()
 				start := 0
 				if fc.cursor >= contentHeight {
 					start = fc.cursor - contentHeight + 1
@@ -203,6 +252,33 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case tea.KeyMsg:
+		// Search input mode — capture all keys
+		if m.searching {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				query := strings.TrimSpace(m.searchInput.Value())
+				m.searching = false
+				if query == "" {
+					m.searchQuery = ""
+					m.searchCache = nil
+					return m, nil
+				}
+				m.searchQuery = query
+				m.searchCache = &folderCache{}
+				m.syncing = true
+				return m, m.fetchSearch(query)
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.searching = false
+				m.searchInput.SetValue(m.searchQuery) // restore previous query
+				return m, nil
+			}
+
+			var cmd tea.Cmd
+			m.searchInput, cmd = m.searchInput.Update(msg)
+			return m, cmd
+		}
+
 		fc := m.fc()
 		switch {
 		case key.Matches(msg, common.Keys.Quit):
@@ -220,15 +296,36 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.NextTab):
 			m.tabIdx = (m.tabIdx + 1) % len(folders)
+			m.searchQuery = ""
+			m.searchCache = nil
+			m.searching = false
 			m.syncing = true
 			m.err = ""
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.PrevTab):
 			m.tabIdx = (m.tabIdx - 1 + len(folders)) % len(folders)
+			m.searchQuery = ""
+			m.searchCache = nil
+			m.searching = false
 			m.syncing = true
 			m.err = ""
 			return m, m.fetchMessages()
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("/"))):
+			m.searching = true
+			m.searchInput.SetValue("")
+			m.searchInput.Focus()
+			return m, textinput.Blink
+
+		case key.Matches(msg, common.Keys.Back):
+			// Esc clears search if active
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				m.searchCache = nil
+				m.searchInput.SetValue("")
+				return m, nil
+			}
 
 		case key.Matches(msg, common.Keys.Open):
 			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
@@ -242,6 +339,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.Refresh):
 			m.syncing = true
+			if m.searchQuery != "" {
+				return m, m.fetchSearch(m.searchQuery)
+			}
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.Preview):
@@ -251,7 +351,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
 				trashed := fc.messages[fc.cursor]
 				m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(trashed.Subject, 40))
-				// Optimistically remove from list
 				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
 				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
 					fc.cursor--
@@ -263,8 +362,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+func (m Model) contentHeight() int {
+	h := m.height - 6 // tabs(2) + sync(1) + padding(1) + keybinds(2)
+	if m.searching || m.searchQuery != "" {
+		h-- // search bar takes 1 line
+	}
+	if h < 1 {
+		h = 1
+	}
+	return h
+}
+
 // View renders the inbox.
-// Layout: tabs (top) → sync status → message list → keybinds (bottom)
 func (m Model) View() string {
 	if m.width == 0 {
 		return " Initializing mailmd..."
@@ -285,7 +394,7 @@ func (m Model) View() string {
 	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
 	b.WriteString(tabRow + "\n")
 
-	// 2. Sync status line — left: sync info + count, right: last action
+	// 2. Sync status line — left: sync info + count, right: status aligned to date column
 	leftParts := ""
 	if m.syncing {
 		leftParts = common.SyncingStyle.Render(" Syncing...")
@@ -304,16 +413,24 @@ func (m Model) View() string {
 	if len(fc.messages) > 0 {
 		leftParts += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(fc.messages)))
 	}
+	if m.searchQuery != "" {
+		leftParts += common.SyncingStyle.Render(fmt.Sprintf("  Search: \"%s\"", m.searchQuery))
+	}
 
 	rightParts := ""
 	if m.status != "" {
-		rightParts = common.MutedStyle.Render(m.status + "  ")
+		rightParts = common.MutedStyle.Render(m.status)
 	}
 
-	// Fill space between left and right
+	// Right-align status to the date column position (last ~8 chars of list width)
+	listWidth := m.width
+	if m.showPreview {
+		listWidth = m.width * 6 / 10
+	}
+	rightPos := listWidth - 2 // align with date column end
 	leftW := rw.StringWidth(lipgloss.NewStyle().Render(leftParts))
 	rightW := rw.StringWidth(lipgloss.NewStyle().Render(rightParts))
-	gap := m.width - leftW - rightW
+	gap := rightPos - leftW - rightW
 	if gap < 1 {
 		gap = 1
 	}
@@ -322,23 +439,39 @@ func (m Model) View() string {
 	// Padding below status line
 	b.WriteString("\n")
 
-	// 3. Keybinds bar (appended at the bottom)
-	keybinds := common.StatusBar.Width(m.width).Render(
-		" j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit")
-
-	// Content area height: total - tabs(2) - sync(1) - padding(1) - keybinds(2)
-	contentHeight := m.height - 6
-	if contentHeight < 1 {
-		contentHeight = 1
+	// 3. Search bar (if active or has query)
+	if m.searching {
+		searchBar := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FFFFFF")).
+			Background(lipgloss.Color("#374151")).
+			Width(m.width).
+			Padding(0, 1).
+			Render("/ " + m.searchInput.View())
+		b.WriteString(searchBar + "\n")
+	} else if m.searchQuery != "" {
+		searchBar := lipgloss.NewStyle().
+			Foreground(common.Muted).
+			Width(m.width).
+			Padding(0, 1).
+			Render(fmt.Sprintf("/ %s  (esc to clear)", m.searchQuery))
+		b.WriteString(searchBar + "\n")
 	}
 
-	// 4. Message list — always show cached messages, even while syncing
+	// 4. Keybinds bar (appended at the bottom)
+	keybindText := " j/k=nav  o=open  c=compose  d=trash  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	keybinds := common.StatusBar.Width(m.width).Render(keybindText)
+
+	contentHeight := m.contentHeight()
+
+	// 5. Message list
 	if len(fc.messages) == 0 {
-		emptyMsg := "  No messages."
 		if m.syncing {
-			emptyMsg = "  Loading messages..."
+			b.WriteString("\n  Loading messages...\n")
+		} else if m.searchQuery != "" {
+			b.WriteString("\n  No results.\n")
+		} else {
+			b.WriteString("\n  No messages.\n")
 		}
-		b.WriteString("\n" + emptyMsg + "\n")
 		for i := 2; i < contentHeight; i++ {
 			b.WriteString("\n")
 		}
@@ -346,15 +479,13 @@ func (m Model) View() string {
 		return b.String()
 	}
 
-	// Layout: full list or split pane depending on preview toggle
-	listWidth := m.width
+	previewWidth := 0
 	if m.showPreview {
 		listWidth = m.width * 6 / 10
+		previewWidth = m.width - listWidth - 1
 	}
-	previewWidth := m.width - listWidth - 1
 	visibleRows := contentHeight
 
-	// Build message list
 	var listLines []string
 	start := 0
 	if fc.cursor >= visibleRows {
@@ -377,13 +508,11 @@ func (m Model) View() string {
 		}
 		listLines = append(listLines, line)
 	}
-	// Pad to fill content area
 	for len(listLines) < contentHeight {
 		listLines = append(listLines, "")
 	}
 
 	if m.showPreview {
-		// Build preview pane
 		var previewLines []string
 		if fc.cursor < len(fc.messages) {
 			cur := fc.messages[fc.cursor]
@@ -392,8 +521,6 @@ func (m Model) View() string {
 		for len(previewLines) < contentHeight {
 			previewLines = append(previewLines, "")
 		}
-
-		// Combine side by side
 		divider := lipgloss.NewStyle().Foreground(common.Secondary)
 		for i := 0; i < contentHeight; i++ {
 			left := ""
@@ -416,7 +543,7 @@ func (m Model) View() string {
 		}
 	}
 
-	// 5. Keybinds at bottom
+	// 6. Keybinds at bottom
 	b.WriteString(keybinds)
 
 	return b.String()
@@ -427,7 +554,6 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 		return ""
 	}
 
-	// Column widths: unread(2) + from(fromW) + gap(2) + subject(flex) + gap(1) + date(dateW)
 	dateW := 6
 	fromW := width / 4
 	if fromW > 24 {
@@ -437,13 +563,11 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 		fromW = 12
 	}
 
-	// Unread indicator
 	unread := " "
 	if msg.Unread {
 		unread = "●"
 	}
 
-	// From — extract display name if possible
 	from := msg.From
 	if idx := strings.Index(from, "<"); idx > 1 {
 		from = strings.TrimSpace(from[:idx])
@@ -451,7 +575,6 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	from = runewidthTruncate(from, fromW)
 	from = runewidthPadRight(from, fromW)
 
-	// Date — always right-aligned, fixed width (ASCII only, so fmt is fine)
 	dateStr := ""
 	if !msg.Date.IsZero() {
 		now := time.Now()
@@ -465,7 +588,6 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
-	// Subject — fills remaining space
 	subjectW := width - 2 - fromW - 2 - 1 - dateW
 	if subjectW < 0 {
 		subjectW = 0
@@ -482,14 +604,11 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 
 func buildPreview(msg gmail.MessageSummary, width, height int) []string {
 	var lines []string
-
 	header := fmt.Sprintf("From: %s", msg.From)
 	lines = append(lines, truncate(header, width))
 	subject := fmt.Sprintf("Subj: %s", msg.Subject)
 	lines = append(lines, truncate(subject, width))
 	lines = append(lines, strings.Repeat("─", width))
-
-	// Wrap snippet across lines
 	snippet := msg.Snippet
 	for len(snippet) > 0 {
 		if len(lines) >= height {
@@ -502,12 +621,9 @@ func buildPreview(msg gmail.MessageSummary, width, height int) []string {
 		lines = append(lines, snippet[:end])
 		snippet = snippet[end:]
 	}
-
 	return lines
 }
 
-// runewidthTruncate truncates a string to fit within the given display width,
-// accounting for multi-byte characters and wide glyphs (CJK, emojis).
 func runewidthTruncate(s string, width int) string {
 	if width <= 0 {
 		return ""
@@ -515,7 +631,6 @@ func runewidthTruncate(s string, width int) string {
 	return rw.Truncate(s, width, "…")
 }
 
-// runewidthPadRight pads a string with spaces to reach the given display width.
 func runewidthPadRight(s string, width int) string {
 	sw := rw.StringWidth(s)
 	if sw >= width {
