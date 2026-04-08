@@ -1,0 +1,39 @@
+version: 2
+
+builds:
+  - main: ./cmd/mailmd
+    binary: mailmd
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X main.version={{.Version}}
+
+archives:
+  - format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+brews:
+  - repository:
+      owner: deric
+      name: homebrew-tap
+    homepage: "https://github.com/deric/mailmd"
+    description: "A terminal email client for Gmail where you compose in markdown"
+    install: |
+      bin.install "mailmd"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
