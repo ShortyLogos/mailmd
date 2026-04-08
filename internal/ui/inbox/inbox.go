@@ -166,13 +166,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionRelease {
-				// Calculate which message was clicked (status bar + tab bar = 3 header rows, 2 lines per message)
-				row := (msg.Y - 3) / 2 // subtract header, divide by lines per row
-				contentHeight := m.height - 3
-				visibleRows := contentHeight / 2
+				// tabs(2) + sync(1) = 3 header rows, 1 line per message
+				row := msg.Y - 3
+				contentHeight := m.height - 5
 				start := 0
-				if m.cursor >= visibleRows {
-					start = m.cursor - visibleRows + 1
+				if m.cursor >= contentHeight {
+					start = m.cursor - contentHeight + 1
 				}
 				idx := start + row
 				if idx >= 0 && idx < len(m.messages) {
@@ -244,22 +243,15 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 }
 
 // View renders the inbox.
+// Layout: tabs (top) → sync status → message list → keybinds (bottom)
 func (m Model) View() string {
 	if m.width == 0 {
 		return "Loading..."
 	}
 
 	var b strings.Builder
-	rowSep := lipgloss.NewStyle().Foreground(lipgloss.Color("#2D3748"))
 
-	// Status bar at top
-	statusText := m.status
-	if statusText == "" {
-		statusText = " j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit"
-	}
-	b.WriteString(common.StatusBar.Width(m.width).Render(statusText) + "\n")
-
-	// Tab bar with sync indicator
+	// 1. Tab bar at top
 	tabs := make([]string, len(folders))
 	for i, f := range folders {
 		if i == m.tabIdx {
@@ -268,50 +260,70 @@ func (m Model) View() string {
 			tabs[i] = common.InactiveTab.Render(f.name)
 		}
 	}
+	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
+	b.WriteString(tabRow + "\n")
 
-	syncIndicator := ""
-	if m.syncing {
-		syncIndicator = common.SyncingStyle.Render("  Syncing...")
+	// 2. Sync status line
+	syncLine := ""
+	if m.syncing || m.loading {
+		syncLine = common.SyncingStyle.Render(" Syncing...")
+	} else if m.err != "" {
+		syncLine = common.ErrorStyle.Render(" Error: " + m.err)
 	} else if !m.lastSync.IsZero() {
 		ago := time.Since(m.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
-			syncIndicator = common.SyncedStyle.Render("  Synced")
+			syncLine = common.SyncedStyle.Render(" Synced")
 		} else if ago < time.Minute {
-			syncIndicator = common.SyncedStyle.Render(fmt.Sprintf("  Synced %ds ago", int(ago.Seconds())))
+			syncLine = common.SyncedStyle.Render(fmt.Sprintf(" Synced %ds ago", int(ago.Seconds())))
 		} else {
-			syncIndicator = common.MutedStyle.Render(fmt.Sprintf("  Synced %dm ago", int(ago.Minutes())))
+			syncLine = common.MutedStyle.Render(fmt.Sprintf(" Synced %dm ago", int(ago.Minutes())))
 		}
 	}
-
-	countInfo := common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(m.messages)))
-	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, "") + syncIndicator + countInfo)
-	b.WriteString(tabRow + "\n")
-
-	// Calculate content area height (subtract status bar, tab bar, bottom padding)
-	contentHeight := m.height - 3
-
-	if m.loading {
-		b.WriteString("\n  Loading messages...\n")
-		return b.String()
+	if len(m.messages) > 0 {
+		syncLine += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(m.messages)))
 	}
-	if m.err != "" {
-		b.WriteString("\n" + common.ErrorStyle.Render("Error: "+m.err) + "\n")
-		return b.String()
+	if m.status != "" {
+		syncLine += "  " + common.MutedStyle.Render(m.status)
 	}
-	if len(m.messages) == 0 {
+	b.WriteString(syncLine + "\n")
+
+	// 3. Keybinds bar (will be appended at the bottom)
+	keybinds := common.StatusBar.Width(m.width).Render(
+		" j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit")
+
+	// Content area height: total - tabs(2) - sync(1) - keybinds(2)
+	contentHeight := m.height - 5
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
+	// 4. Message list
+	if len(m.messages) == 0 && !m.loading {
 		b.WriteString("\n  No messages.\n")
+		// Pad remaining space
+		for i := 0; i < contentHeight-2; i++ {
+			b.WriteString("\n")
+		}
+		b.WriteString(keybinds)
+		return b.String()
+	}
+
+	if len(m.messages) == 0 && m.loading {
+		b.WriteString("\n  Loading messages...\n")
+		for i := 0; i < contentHeight-2; i++ {
+			b.WriteString("\n")
+		}
+		b.WriteString(keybinds)
 		return b.String()
 	}
 
 	// Layout: full list or split pane depending on preview toggle
-	// Each message takes 2 lines: content + separator
-	linesPerRow := 2
 	listWidth := m.width
 	if m.showPreview {
 		listWidth = m.width * 6 / 10
 	}
 	previewWidth := m.width - listWidth - 1
-	visibleRows := contentHeight / linesPerRow
+	visibleRows := contentHeight
 
 	// Build message list
 	var listLines []string
@@ -335,9 +347,6 @@ func (m Model) View() string {
 			line = common.ReadMessage.Width(listWidth - 2).Render(line)
 		}
 		listLines = append(listLines, line)
-		// Add subtle row separator
-		sep := rowSep.Render(strings.Repeat("─", listWidth))
-		listLines = append(listLines, sep)
 	}
 	// Pad to fill content area
 	for len(listLines) < contentHeight {
@@ -377,6 +386,9 @@ func (m Model) View() string {
 			}
 		}
 	}
+
+	// 5. Keybinds at bottom
+	b.WriteString(keybinds)
 
 	return b.String()
 }
