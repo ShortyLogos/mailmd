@@ -285,36 +285,49 @@ func (m Model) View() string {
 	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
 	b.WriteString(tabRow + "\n")
 
-	// 2. Sync status line
-	syncLine := ""
+	// 2. Sync status line — left: sync info + count, right: last action
+	leftParts := ""
 	if m.syncing {
-		syncLine = common.SyncingStyle.Render(" Syncing...")
+		leftParts = common.SyncingStyle.Render(" Syncing...")
 	} else if m.err != "" {
-		syncLine = common.ErrorStyle.Render(" Error: " + m.err)
+		leftParts = common.ErrorStyle.Render(" Error: " + m.err)
 	} else if !fc.lastSync.IsZero() {
 		ago := time.Since(fc.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
-			syncLine = common.SyncedStyle.Render(" Synced")
+			leftParts = common.SyncedStyle.Render(" Synced")
 		} else if ago < time.Minute {
-			syncLine = common.SyncedStyle.Render(fmt.Sprintf(" Synced %ds ago", int(ago.Seconds())))
+			leftParts = common.SyncedStyle.Render(fmt.Sprintf(" Synced %ds ago", int(ago.Seconds())))
 		} else {
-			syncLine = common.MutedStyle.Render(fmt.Sprintf(" Synced %dm ago", int(ago.Minutes())))
+			leftParts = common.MutedStyle.Render(fmt.Sprintf(" Synced %dm ago", int(ago.Minutes())))
 		}
 	}
 	if len(fc.messages) > 0 {
-		syncLine += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(fc.messages)))
+		leftParts += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(fc.messages)))
 	}
+
+	rightParts := ""
 	if m.status != "" {
-		syncLine += "  " + common.MutedStyle.Render(m.status)
+		rightParts = common.MutedStyle.Render(m.status + "  ")
 	}
-	b.WriteString(syncLine + "\n")
+
+	// Fill space between left and right
+	leftW := rw.StringWidth(lipgloss.NewStyle().Render(leftParts))
+	rightW := rw.StringWidth(lipgloss.NewStyle().Render(rightParts))
+	gap := m.width - leftW - rightW
+	if gap < 1 {
+		gap = 1
+	}
+	b.WriteString(leftParts + strings.Repeat(" ", gap) + rightParts + "\n")
+
+	// Padding below status line
+	b.WriteString("\n")
 
 	// 3. Keybinds bar (appended at the bottom)
 	keybinds := common.StatusBar.Width(m.width).Render(
 		" j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit")
 
-	// Content area height: total - tabs(2) - sync(1) - keybinds(2)
-	contentHeight := m.height - 5
+	// Content area height: total - tabs(2) - sync(1) - padding(1) - keybinds(2)
+	contentHeight := m.height - 6
 	if contentHeight < 1 {
 		contentHeight = 1
 	}
