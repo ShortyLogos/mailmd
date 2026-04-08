@@ -267,7 +267,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 // Layout: tabs (top) → sync status → message list → keybinds (bottom)
 func (m Model) View() string {
 	if m.width == 0 {
-		return "Loading..."
+		return " Initializing mailmd..."
 	}
 
 	fc := m.fc()
@@ -321,12 +321,12 @@ func (m Model) View() string {
 
 	// 4. Message list — always show cached messages, even while syncing
 	if len(fc.messages) == 0 {
+		emptyMsg := "  No messages."
 		if m.syncing {
-			b.WriteString("\n  Loading messages...\n")
-		} else {
-			b.WriteString("\n  No messages.\n")
+			emptyMsg = "  Loading messages..."
 		}
-		for i := 0; i < contentHeight-2; i++ {
+		b.WriteString("\n" + emptyMsg + "\n")
+		for i := 2; i < contentHeight; i++ {
 			b.WriteString("\n")
 		}
 		b.WriteString(keybinds)
