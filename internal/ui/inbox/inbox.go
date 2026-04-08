@@ -36,6 +36,9 @@ type messagesLoadedMsg struct {
 // trashDoneMsg signals a trash operation completed.
 type trashDoneMsg struct{ err error }
 
+// pollTickMsg triggers a background refresh.
+type pollTickMsg struct{}
+
 // Model is the inbox Bubble Tea model.
 type Model struct {
 	ctx         context.Context
@@ -60,9 +63,15 @@ func New(ctx context.Context, client gmail.Client) Model {
 	}
 }
 
-// Init loads messages for the default folder.
+// Init loads messages for the default folder and starts polling.
 func (m Model) Init() tea.Cmd {
-	return m.fetchMessages()
+	return tea.Batch(m.fetchMessages(), m.pollTick())
+}
+
+func (m Model) pollTick() tea.Cmd {
+	return tea.Tick(2*time.Minute, func(time.Time) tea.Msg {
+		return pollTickMsg{}
+	})
 }
 
 func (m Model) fetchMessages() tea.Cmd {
@@ -112,6 +121,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.loading = true
 			return m, m.fetchMessages()
 		}
+
+	case pollTickMsg:
+		return m, tea.Batch(m.fetchMessages(), m.pollTick())
 
 	case common.StatusMsg:
 		m.status = msg.Text
@@ -180,6 +192,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, common.Keys.Compose):
 			tmpl := markdown.ComposeTemplate()
 			return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
+
+		case key.Matches(msg, common.Keys.Refresh):
+			m.loading = true
+			m.status = "Refreshing..."
+			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.Preview):
 			m.showPreview = !m.showPreview
@@ -302,7 +319,7 @@ func (m Model) View() string {
 	// Status bar
 	statusText := m.status
 	if statusText == "" {
-		statusText = fmt.Sprintf(" %d messages  [%s]  j/k=nav  o=open  c=compose  d=trash  p=preview  tab=folder  q=quit",
+		statusText = fmt.Sprintf(" %d messages  [%s]  j/k=nav  o=open  c=compose  d=trash  p=preview  R=refresh  tab=folder  q=quit",
 			len(m.messages), folders[m.tabIdx].name)
 	}
 	b.WriteString(common.StatusBar.Width(m.width).Render(statusText))
