@@ -24,3 +24,6 @@ type FetchMessageMsg struct{ ID string }
 // FetchAndReplyMsg is sent when the inbox wants to reply to a message directly.
 // The app shell fetches the full message, then opens the compose flow with a reply template.
 type FetchAndReplyMsg struct{ ID string }
+
+// TrashFromReaderMsg is sent when the user trashes/deletes a message from the reader view.
+type TrashFromReaderMsg struct{ ID string }

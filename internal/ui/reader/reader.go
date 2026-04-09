@@ -236,6 +236,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
 			}
 
+		case key.Matches(msg, common.Keys.Trash):
+			if m.message != nil {
+				id := m.message.ID
+				return m, func() tea.Msg { return common.TrashFromReaderMsg{ID: id} }
+			}
+
 		case key.Matches(msg, common.Keys.Up):
 			m.viewport.LineUp(7)
 			return m, nil
@@ -337,7 +343,7 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View())
 
 	// Status bar
-	status := " esc=back  r=reply  f=forward  P=open in browser  j/k=scroll  q=quit"
+	status := " esc=back  r=reply  f=forward  d=trash  P=browser  j/k=scroll  q=quit"
 	if len(m.links) > 0 {
 		if m.goLink {
 			status = " Press 1-9 to open link (esc=cancel)" + strings.Repeat(" ", 20) // pad to prevent flicker

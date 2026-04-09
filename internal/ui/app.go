@@ -162,6 +162,33 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.active = screenCompose
 		return a, a.composer.Init()
 
+	case common.TrashFromReaderMsg:
+		a.active = screenInbox
+		id := msg.ID
+		// Optimistic removal from inbox cache
+		a.inbox.OptimisticRemove(id)
+		delete(a.msgCache, id)
+		// Trash or delete depending on folder
+		label := a.inbox.CurrentLabelID()
+		if label == "TRASH" {
+			a.inbox.SetStatus("Deleting message...")
+			return a, func() tea.Msg {
+				err := a.client.DeleteMessage(a.ctx, id)
+				if err != nil {
+					return common.StatusMsg{Text: "Error: " + err.Error()}
+				}
+				return common.StatusMsg{Text: "Message permanently deleted."}
+			}
+		}
+		a.inbox.SetStatus("Trashing message...")
+		return a, func() tea.Msg {
+			err := a.client.TrashMessage(a.ctx, id)
+			if err != nil {
+				return common.StatusMsg{Text: "Error: " + err.Error()}
+			}
+			return common.StatusMsg{Text: "Message trashed."}
+		}
+
 	case common.BackToInboxMsg:
 		a.active = screenInbox
 		a.status = ""

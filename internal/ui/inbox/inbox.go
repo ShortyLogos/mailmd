@@ -316,6 +316,25 @@ func (m *Model) SetLoadingStatus(text string) {
 	m.statusLoading = true
 }
 
+// CurrentLabelID returns the active folder's label ID.
+func (m Model) CurrentLabelID() string {
+	return folders[m.tabIdx].labelID
+}
+
+// OptimisticRemove removes a message by ID from the active folder cache.
+func (m *Model) OptimisticRemove(id string) {
+	fc := m.fc()
+	for i, msg := range fc.messages {
+		if msg.ID == id {
+			fc.messages = append(fc.messages[:i], fc.messages[i+1:]...)
+			if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+				fc.cursor = len(fc.messages) - 1
+			}
+			return
+		}
+	}
+}
+
 // MarkRead optimistically marks a message as read in the local cache.
 func (m *Model) MarkRead(id string) {
 	for tabIdx, fc := range m.cache {
