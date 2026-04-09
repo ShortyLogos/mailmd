@@ -697,7 +697,7 @@ func (m Model) View() string {
 		if hasSelection {
 			checkW = 2
 			if fc.selected[msg.ID] {
-				check = "● "
+				check = "> "
 			} else {
 				check = "  "
 			}
@@ -708,7 +708,7 @@ func (m Model) View() string {
 		if i == fc.cursor {
 			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if fc.selected[msg.ID] {
-			line = lipgloss.NewStyle().Foreground(common.Accent).Padding(0, 0).Width(0).Render(" " + line + " ")
+			line = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6")).Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if msg.Unread {
 			line = common.UnreadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else {
