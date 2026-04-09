@@ -113,7 +113,7 @@ func (m Model) Init() tea.Cmd {
 // Colors link references [N: ...] and email addresses.
 func renderPlainEmail(body string) string {
 	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Italic(true) // sky blue
-	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))              // light purple
+	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))              // green
 
 	var result strings.Builder
 	for _, line := range strings.Split(body, "\n") {
