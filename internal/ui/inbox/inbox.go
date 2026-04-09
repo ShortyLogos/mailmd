@@ -299,6 +299,11 @@ func (m Model) TabIdx() int {
 	return m.tabIdx
 }
 
+// SpinnerTick returns the spinner's tick command to keep it animating.
+func (m Model) SpinnerTick() tea.Cmd {
+	return m.spinner.Tick
+}
+
 // SetStatus sets the action text in the status line.
 func (m *Model) SetStatus(text string) {
 	m.status = text

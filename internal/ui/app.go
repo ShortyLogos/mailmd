@@ -104,10 +104,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Show loading state, fetch in background
 		a.loading = true
-		return a, func() tea.Msg {
-			full, err := a.client.GetMessage(a.ctx, id)
-			return fetchMsgResultMsg{msg: full, err: err}
-		}
+		return a, tea.Batch(
+			func() tea.Msg {
+				full, err := a.client.GetMessage(a.ctx, id)
+				return fetchMsgResultMsg{msg: full, err: err}
+			},
+			a.inbox.SpinnerTick(),
+		)
 
 	case common.FetchAndReplyMsg:
 		id := msg.ID
