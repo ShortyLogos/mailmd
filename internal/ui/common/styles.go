@@ -24,7 +24,7 @@ var (
 
 	// Message list
 	SelectedMessage = lipgloss.NewStyle().Bold(true).Foreground(White).Background(Primary).Padding(0, 1)
-	CheckedMessage  = lipgloss.NewStyle().Foreground(Info)
+	CheckedMessage  = lipgloss.NewStyle().Foreground(Info).Bold(true)
 	UnreadMessage   = lipgloss.NewStyle().Bold(true).Padding(0, 1)
 	ReadMessage     = lipgloss.NewStyle().Foreground(Muted).Padding(0, 1)
 
