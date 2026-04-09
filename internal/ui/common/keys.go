@@ -11,8 +11,8 @@ type KeyMap struct {
 var Keys = KeyMap{
 	Up:       key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k", "up")),
 	Down:     key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j", "down")),
-	Open:     key.NewBinding(key.WithKeys("enter", "o"), key.WithHelp("o", "open")),
-	Back:     key.NewBinding(key.WithKeys("esc", "backspace"), key.WithHelp("esc", "back")),
+	Open:     key.NewBinding(key.WithKeys("enter", "o", "right"), key.WithHelp("o", "open")),
+	Back:     key.NewBinding(key.WithKeys("esc", "backspace", "left"), key.WithHelp("esc", "back")),
 	Compose:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "compose")),
 	Reply:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
 	Forward:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "forward")),
