@@ -175,8 +175,12 @@ func (m Model) fetchSearch(query string) tea.Cmd {
 
 func (m Model) deleteMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
+		errs := make(chan error, len(ids))
 		for _, id := range ids {
-			if err := m.client.DeleteMessage(m.ctx, id); err != nil {
+			go func(id string) { errs <- m.client.DeleteMessage(m.ctx, id) }(id)
+		}
+		for range ids {
+			if err := <-errs; err != nil {
 				return deleteDoneMsg{err: err}
 			}
 		}
@@ -186,8 +190,12 @@ func (m Model) deleteMessages(ids []string) tea.Cmd {
 
 func (m Model) restoreMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
+		errs := make(chan error, len(ids))
 		for _, id := range ids {
-			if err := m.client.UntrashMessage(m.ctx, id); err != nil {
+			go func(id string) { errs <- m.client.UntrashMessage(m.ctx, id) }(id)
+		}
+		for range ids {
+			if err := <-errs; err != nil {
 				return restoreDoneMsg{err: err}
 			}
 		}
@@ -197,8 +205,12 @@ func (m Model) restoreMessages(ids []string) tea.Cmd {
 
 func (m Model) trashMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
+		errs := make(chan error, len(ids))
 		for _, id := range ids {
-			if err := m.client.TrashMessage(m.ctx, id); err != nil {
+			go func(id string) { errs <- m.client.TrashMessage(m.ctx, id) }(id)
+		}
+		for range ids {
+			if err := <-errs; err != nil {
 				return trashDoneMsg{err: err}
 			}
 		}
