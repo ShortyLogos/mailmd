@@ -549,15 +549,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.SelectAll):
 			if len(fc.messages) > 0 {
-				// Toggle: if all selected → deselect all, otherwise select all
-				allSelected := true
-				for _, msg := range fc.messages {
-					if !fc.selected[msg.ID] {
-						allSelected = false
-						break
-					}
-				}
-				if allSelected {
+				// Any selected → deselect all, none selected → select all
+				if len(fc.selected) > 0 {
 					fc.selected = make(map[string]bool)
 				} else {
 					for _, msg := range fc.messages {
