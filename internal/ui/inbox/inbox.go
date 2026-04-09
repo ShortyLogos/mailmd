@@ -720,9 +720,9 @@ func (m Model) View() string {
 	countText := common.MutedStyle.Render(fmt.Sprintf("%d messages", len(fc.messages)))
 	leftContent := " " + countText + "  " + syncText
 
-	// Pad/truncate left zone to fixed width
+	// Pad left zone to fixed width using ANSI-aware width measurement
+	leftActualW := lipgloss.Width(leftContent)
 	leftRendered := leftContent
-	leftActualW := rw.StringWidth(lipgloss.NewStyle().Render(leftRendered))
 	if leftActualW < leftZoneW {
 		leftRendered += strings.Repeat(" ", leftZoneW-leftActualW)
 	}
