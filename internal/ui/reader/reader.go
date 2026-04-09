@@ -3,7 +3,6 @@ package reader
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -35,7 +34,9 @@ type Model struct {
 	width    int
 	height   int
 	ready    bool
-	tabIdx   int // active folder tab (for display only)
+	tabIdx   int      // active folder tab (for display only)
+	links    []string // extracted URLs, indexed from 1
+	goLink   bool     // true when waiting for link number after 'g'
 }
 
 // New creates a new reader model for the given message.
@@ -68,7 +69,7 @@ func (m *Model) initViewport() {
 	m.ready = true
 }
 
-func (m Model) renderBody() string {
+func (m *Model) renderBody() string {
 	if m.message == nil {
 		return ""
 	}
@@ -78,16 +79,19 @@ func (m Model) renderBody() string {
 		body = "(No message body)"
 	}
 
-	// Convert bare URLs to markdown links with short display text
-	// Glamour renders these as OSC 8 clickable hyperlinks in supported terminals
-	body = shortenURLs(body)
+	// Extract URLs and replace with numbered references [1], [2], etc.
+	m.links = nil
+	body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
+		m.links = append(m.links, rawURL)
+		return fmt.Sprintf("[%d]", len(m.links))
+	})
 
-	// Wrap text at 80 chars but preserve URLs on single lines
+	// Wrap text at 80 chars
 	body = wrapText(body, 80)
 
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0), // we handle wrapping ourselves
+		glamour.WithWordWrap(0),
 	)
 	if err != nil {
 		return markdown.ConvertPlain(body)
@@ -96,6 +100,15 @@ func (m Model) renderBody() string {
 	if err != nil {
 		return markdown.ConvertPlain(body)
 	}
+
+	// Append link references at the bottom
+	if len(m.links) > 0 {
+		rendered += "\n  Links:\n"
+		for i, link := range m.links {
+			rendered += fmt.Sprintf("  [%d] %s\n", i+1, link)
+		}
+	}
+
 	return rendered
 }
 
@@ -200,6 +213,21 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
+		// Link open mode: g was pressed, waiting for number
+		if m.goLink {
+			m.goLink = false
+			if len(msg.String()) == 1 {
+				c := msg.String()[0]
+				if c >= '1' && c <= '9' {
+					idx := int(c - '1')
+					if idx < len(m.links) {
+						openFile(m.links[idx])
+					}
+				}
+			}
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, common.Keys.Back):
 			return m, func() tea.Msg { return common.BackToInboxMsg{} }
@@ -235,17 +263,25 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, tea.Quit
 
 		default:
-			if len(m.message.Attachments) > 0 && len(msg.String()) == 1 {
+			if len(msg.String()) == 1 {
 				c := msg.String()[0]
-				// Number keys open individual attachments (1-9)
-				if c >= '1' && c <= '9' {
+
+				// g = open link mode
+				if c == 'g' && len(m.links) > 0 {
+					m.goLink = true
+					return m, nil
+				}
+
+				// Number keys open attachments (1-9)
+				if c >= '1' && c <= '9' && len(m.message.Attachments) > 0 {
 					idx := int(c - '1')
 					if idx < len(m.message.Attachments) {
 						return m, m.openAttachment(idx)
 					}
 				}
+
 				// I = open all images
-				if c == 'I' {
+				if c == 'I' && len(m.message.Attachments) > 0 {
 					return m, m.openAllImages()
 				}
 			}
@@ -310,6 +346,13 @@ func (m Model) View() string {
 
 	// Status bar
 	status := " esc=back  r=reply  f=forward  P=open in browser  j/k=scroll  q=quit"
+	if len(m.links) > 0 {
+		if m.goLink {
+			status = " Press 1-9 to open link (esc=cancel)" + strings.Repeat(" ", 20) // pad to prevent flicker
+		} else {
+			status = " esc=back  r=reply  f=forward  P=browser  g=open link  j/k=scroll  q=quit"
+		}
+	}
 	if len(m.message.Attachments) > 0 {
 		status += "  1-9=open attachment"
 		hasImages := false
@@ -331,35 +374,6 @@ func (m Model) View() string {
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
 
-// shortenURLs converts bare URLs to markdown links with truncated display text.
-// e.g. "https://example.com/very/long/path?q=1" → "[example.com/very/long/...](https://example.com/very/long/path?q=1)"
-// Glamour renders these as OSC 8 clickable hyperlinks in terminals that support it (Ghostty, Kitty, iTerm2).
-func shortenURLs(text string) string {
-	return urlRegex.ReplaceAllStringFunc(text, func(rawURL string) string {
-		display := shortenURL(rawURL, 50)
-		// Don't convert if already inside a markdown link
-		return "[" + display + "](" + rawURL + ")"
-	})
-}
-
-func shortenURL(rawURL string, maxLen int) string {
-	u, err := url.Parse(rawURL)
-	if err != nil {
-		if len(rawURL) > maxLen {
-			return rawURL[:maxLen-3] + "..."
-		}
-		return rawURL
-	}
-	// Show host + truncated path
-	display := u.Host + u.Path
-	if u.RawQuery != "" {
-		display += "?" + u.RawQuery
-	}
-	if len(display) > maxLen {
-		return display[:maxLen-3] + "..."
-	}
-	return display
-}
 
 // wrapText wraps lines at maxWidth on word boundaries, but leaves URLs intact.
 func wrapText(text string, maxWidth int) string {

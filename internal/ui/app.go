@@ -3,7 +3,6 @@ package ui
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/deric/mailmd/internal/config"
@@ -96,6 +95,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.FetchMessageMsg:
 		id := msg.ID
 		a.inbox.MarkRead(id) // optimistic local update
+		a.inbox.SetStatus("Opening message...")
 		// Check cache first
 		if cached, ok := a.msgCache[id]; ok {
 			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())
@@ -138,12 +138,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case fetchMsgResultMsg:
 		a.loading = false
+		a.inbox.SetStatus("")
 		if msg.err != nil {
-			a.status = fmt.Sprintf("Error fetching message: %v", msg.err)
+			a.inbox.SetStatus(fmt.Sprintf("Error: %v", msg.err))
 			return a, nil
 		}
 		a.msgCache[msg.msg.ID] = msg.msg
-		a.inbox.MarkRead(msg.msg.ID) // optimistic local update
+		a.inbox.MarkRead(msg.msg.ID)
 		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
 		return a, tea.Batch(a.reader.Init(), a.markAsRead(msg.msg.ID))
@@ -206,14 +207,7 @@ func (a App) markAsRead(id string) tea.Cmd {
 // View delegates to the active screen.
 func (a App) View() string {
 	if a.loading {
-		// Show inbox with a loading indicator overlaid on the status line
-		view := a.inbox.View()
-		// Replace last line with loading message
-		lines := strings.Split(view, "\n")
-		if len(lines) > 1 {
-			lines[len(lines)-2] = common.StatusBar.Width(a.width).Render(" Opening message...")
-		}
-		return strings.Join(lines, "\n")
+		return a.inbox.View()
 	}
 	switch a.active {
 	case screenReader:
