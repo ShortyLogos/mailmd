@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -75,6 +76,10 @@ type Model struct {
 	searchInput textinput.Model
 	searchQuery string           // active search query (empty = no filter)
 	searchCache *folderCache     // separate cache for search results
+
+	// Jump-to
+	jumping   bool   // true when typing a line number
+	jumpInput string // accumulated digits
 }
 
 // New creates a new inbox model.
@@ -400,7 +405,56 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, cmd
 		}
 
+		// Jump-to mode — typing digits
+		if m.jumping {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				fc := m.fc()
+				n, _ := strconv.Atoi(m.jumpInput)
+				m.jumping = false
+				m.jumpInput = ""
+				if n > 0 && len(fc.messages) > 0 {
+					if n > len(fc.messages) {
+						n = len(fc.messages)
+					}
+					fc.cursor = n - 1 // 1-indexed → 0-indexed
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.jumping = false
+				m.jumpInput = ""
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if len(m.jumpInput) > 0 {
+					m.jumpInput = m.jumpInput[:len(m.jumpInput)-1]
+				}
+				if len(m.jumpInput) == 0 {
+					m.jumping = false
+				}
+				return m, nil
+
+			default:
+				if len(msg.String()) == 1 && msg.String()[0] >= '0' && msg.String()[0] <= '9' {
+					m.jumpInput += msg.String()
+					return m, nil
+				}
+				// Non-digit cancels jump mode
+				m.jumping = false
+				m.jumpInput = ""
+			}
+		}
+
 		fc := m.fc()
+
+		// Start jump mode on digit key press
+		if len(msg.String()) == 1 && msg.String()[0] >= '1' && msg.String()[0] <= '9' {
+			m.jumping = true
+			m.jumpInput = msg.String()
+			return m, nil
+		}
+
 		switch {
 		case key.Matches(msg, common.Keys.Quit):
 			return m, tea.Quit
@@ -622,7 +676,9 @@ func (m Model) View() string {
 	}
 
 	rightParts := ""
-	if m.status != "" {
+	if m.jumping {
+		rightParts = common.SyncingStyle.Render(fmt.Sprintf("Go to: %s_", m.jumpInput))
+	} else if m.status != "" {
 		rightParts = common.MutedStyle.Render(m.status)
 	}
 
@@ -698,8 +754,18 @@ func (m Model) View() string {
 	}
 
 	hasSelection := len(fc.selected) > 0
+	// Line number column width (e.g., 2 digits for ≤99 messages, 3 for ≤999)
+	numW := len(strconv.Itoa(len(fc.messages)))
+	if numW < 2 {
+		numW = 2
+	}
+	numColW := numW + 1 // number + space
+
 	for i := start; i < end; i++ {
 		msg := fc.messages[i]
+		// Line number (1-indexed, right-aligned, dimmed)
+		lineNum := common.MutedStyle.Render(fmt.Sprintf("%*d", numW, i+1)) + " "
+
 		// Selection checkbox prefix
 		checkW := 0
 		check := ""
@@ -711,8 +777,8 @@ func (m Model) View() string {
 				check = "  "
 			}
 		}
-		line := formatMessageLine(msg, listWidth-2-checkW)
-		line = check + line
+		line := formatMessageLine(msg, listWidth-2-numColW-checkW)
+		line = lineNum + check + line
 		line = runewidthPadRight(line, listWidth-2)
 		if i == fc.cursor {
 			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
