@@ -73,7 +73,7 @@ func (m Model) renderBody() string {
 
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(m.width-4),
+		glamour.WithWordWrap(0), // disable wrapping — preserves URLs intact
 	)
 	if err != nil {
 		return markdown.ConvertPlain(body)
@@ -94,33 +94,78 @@ func (m Model) openAttachment(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.message.Attachments) {
 		return nil
 	}
-	att := m.message.Attachments[idx]
+	return m.downloadAndOpen([]gmail.Attachment{m.message.Attachments[idx]})
+}
+
+func (m Model) openAllImages() tea.Cmd {
+	var images []gmail.Attachment
+	for _, att := range m.message.Attachments {
+		if isImage(att.MimeType) {
+			images = append(images, att)
+		}
+	}
+	if len(images) == 0 {
+		return nil
+	}
+	return m.downloadAndOpen(images)
+}
+
+func (m Model) downloadAndOpen(attachments []gmail.Attachment) tea.Cmd {
 	msgID := m.message.ID
 	ctx := m.ctx
 	client := m.client
 	return func() tea.Msg {
-		data, err := client.GetAttachment(ctx, msgID, att.ID)
-		if err != nil {
-			return attachmentOpenedMsg{err: err}
+		type result struct {
+			path string
+			err  error
 		}
-		// Save to temp file and open with default app
-		tmpDir := os.TempDir()
-		path := filepath.Join(tmpDir, "mailmd-"+att.Filename)
-		if err := os.WriteFile(path, data, 0600); err != nil {
-			return attachmentOpenedMsg{err: err}
+		results := make(chan result, len(attachments))
+		for _, att := range attachments {
+			go func(a gmail.Attachment) {
+				data, err := client.GetAttachment(ctx, msgID, a.ID)
+				if err != nil {
+					results <- result{err: err}
+					return
+				}
+				path := filepath.Join(os.TempDir(), "mailmd-"+a.Filename)
+				if err := os.WriteFile(path, data, 0600); err != nil {
+					results <- result{err: err}
+					return
+				}
+				results <- result{path: path}
+			}(att)
 		}
-		var cmd *exec.Cmd
-		switch runtime.GOOS {
-		case "darwin":
-			cmd = exec.Command("open", path)
-		case "linux":
-			cmd = exec.Command("xdg-open", path)
+		// Collect all results, then open
+		var paths []string
+		for range attachments {
+			r := <-results
+			if r.err != nil {
+				return attachmentOpenedMsg{err: r.err}
+			}
+			paths = append(paths, r.path)
 		}
-		if cmd != nil {
-			cmd.Start()
+		for _, p := range paths {
+			openFile(p)
 		}
 		return attachmentOpenedMsg{}
 	}
+}
+
+func openFile(path string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "darwin":
+		cmd = exec.Command("open", path)
+	case "linux":
+		cmd = exec.Command("xdg-open", path)
+	}
+	if cmd != nil {
+		cmd.Start()
+	}
+}
+
+func isImage(mimeType string) bool {
+	return strings.HasPrefix(mimeType, "image/")
 }
 
 // Update handles key events for the reader.
@@ -161,14 +206,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, tea.Quit
 
 		default:
-			// Number keys open attachments (1-9)
 			if len(m.message.Attachments) > 0 && len(msg.String()) == 1 {
 				c := msg.String()[0]
+				// Number keys open individual attachments (1-9)
 				if c >= '1' && c <= '9' {
 					idx := int(c - '1')
 					if idx < len(m.message.Attachments) {
 						return m, m.openAttachment(idx)
 					}
+				}
+				// I = open all images
+				if c == 'I' {
+					return m, m.openAllImages()
 				}
 			}
 
@@ -216,6 +265,16 @@ func (m Model) View() string {
 	status := " esc=back  r=reply  f=forward  j/k=scroll  q=quit"
 	if len(m.message.Attachments) > 0 {
 		status += "  1-9=open attachment"
+		hasImages := false
+		for _, att := range m.message.Attachments {
+			if isImage(att.MimeType) {
+				hasImages = true
+				break
+			}
+		}
+		if hasImages {
+			status += "  I=open all images"
+		}
 	}
 	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
 	b.WriteString(common.StatusBar.Width(m.width).Render(status))
