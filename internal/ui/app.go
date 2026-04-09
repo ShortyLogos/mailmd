@@ -97,9 +97,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		id := msg.ID
 		// Check cache first
 		if cached, ok := a.msgCache[id]; ok {
-			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height)
+			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())
 			a.active = screenReader
-			return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
+			return a, tea.Batch(a.reader.Init(), tea.DisableMouse, a.markAsRead(id))
 		}
 		// Show loading state, fetch in background
 		a.loading = true
@@ -142,12 +142,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.msgCache[msg.msg.ID] = msg.msg
-		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height)
+		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
-		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
+		// Mark as read in the background
+		return a, tea.Batch(a.reader.Init(), tea.DisableMouse, a.markAsRead(msg.msg.ID))
 
 	case common.OpenMessageMsg:
-		a.reader = reader.New(a.ctx, a.client, msg.Message, a.width, a.height)
+		a.reader = reader.New(a.ctx, a.client, msg.Message, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
 		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
 
@@ -192,6 +193,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.composer, cmd = a.composer.Update(msg)
 	}
 	return a, cmd
+}
+
+// markAsRead removes the UNREAD label from a message in the background.
+func (a App) markAsRead(id string) tea.Cmd {
+	return func() tea.Msg {
+		a.client.MoveMessage(a.ctx, id, nil, []string{"UNREAD"})
+		return nil // fire and forget
+	}
 }
 
 // View delegates to the active screen.

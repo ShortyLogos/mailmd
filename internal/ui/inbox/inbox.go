@@ -253,6 +253,11 @@ func (m Model) currentLabelID() string {
 	return folders[m.tabIdx].labelID
 }
 
+// TabIdx returns the active folder tab index.
+func (m Model) TabIdx() int {
+	return m.tabIdx
+}
+
 // Update handles key presses and messages.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {

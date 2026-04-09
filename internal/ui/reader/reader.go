@@ -23,6 +23,8 @@ import (
 // attachmentOpenedMsg signals an attachment was saved and opened.
 type attachmentOpenedMsg struct{ err error }
 
+var folders = []string{"Inbox", "Drafts", "Sent", "Trash"}
+
 // Model is the reader Bubble Tea model.
 type Model struct {
 	ctx      context.Context
@@ -32,28 +34,31 @@ type Model struct {
 	width    int
 	height   int
 	ready    bool
+	tabIdx   int // active folder tab (for display only)
 }
 
 // New creates a new reader model for the given message.
-func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height int) Model {
+func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int) Model {
 	m := Model{
 		ctx:     ctx,
 		client:  client,
 		message: msg,
 		width:   width,
 		height:  height,
+		tabIdx:  tabIdx,
 	}
 	m.initViewport()
 	return m
 }
 
 func (m *Model) initViewport() {
+	tabBarHeight := 2 // tab bar + border
 	headerHeight := 5 // From, To, Subject, Date, separator
 	if len(m.message.Attachments) > 0 {
-		headerHeight += 1 + len(m.message.Attachments) // blank line + one per attachment
+		headerHeight += len(m.message.Attachments) // one per attachment
 	}
-	statusHeight := 1
-	vpHeight := m.height - headerHeight - statusHeight - 1
+	statusHeight := 2 // status bar + border
+	vpHeight := m.height - tabBarHeight - headerHeight - statusHeight
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -253,6 +258,17 @@ func (m Model) View() string {
 	}
 
 	var b strings.Builder
+
+	// Tab bar
+	tabs := make([]string, len(folders))
+	for i, f := range folders {
+		if i == m.tabIdx {
+			tabs[i] = common.ActiveTab.Render(f)
+		} else {
+			tabs[i] = common.InactiveTab.Render(f)
+		}
+	}
+	b.WriteString(common.TabBar.Width(m.width).Render(strings.Join(tabs, "")) + "\n")
 
 	// Header block
 	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("From:    %s", m.message.From)) + "\n")
