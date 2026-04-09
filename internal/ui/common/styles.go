@@ -10,7 +10,7 @@ var (
 	Danger    = lipgloss.Color("#EF4444") // Red — errors
 	Muted     = lipgloss.Color("#9CA3AF") // Light gray — read messages, hints
 	Warning   = lipgloss.Color("#F59E0B") // Amber — syncing
-	Info      = lipgloss.Color("#3B82F6") // Blue — selected items
+	Info      = lipgloss.Color("#06B6D4") // Cyan — selected items
 	White     = lipgloss.Color("#FFFFFF")
 	InputBg   = lipgloss.Color("#374151") // Dark gray — search input background
 )

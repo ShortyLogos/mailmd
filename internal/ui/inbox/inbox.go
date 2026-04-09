@@ -784,7 +784,7 @@ func (m Model) View() string {
 
 		check := "  " // always 2 chars
 		if fc.selected[msg.ID] {
-			check = "> "
+			check = "— "
 		}
 
 		content := formatMessageLine(msg, listWidth-2-numColW-checkW)
