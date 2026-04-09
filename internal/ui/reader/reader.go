@@ -94,11 +94,9 @@ func (m Model) Init() tea.Cmd {
 			return fmt.Sprintf("[%d: %s]", len(links), label)
 		})
 
-		// Extract and number mailto: links
+		// Strip mailto: prefix, leave plain email address (colorized later)
 		body = mailtoRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
-			links = append(links, rawURL)
-			addr := strings.TrimPrefix(rawURL, "mailto:")
-			return fmt.Sprintf("[%d: %s]", len(links), addr)
+			return strings.TrimPrefix(rawURL, "mailto:")
 		})
 
 		// Wrap text
@@ -112,19 +110,20 @@ func (m Model) Init() tea.Cmd {
 }
 
 // renderPlainEmail applies minimal ANSI styling to plain text email body.
-// Colors link references [N: ...] and keeps everything else as-is.
+// Colors link references [N: ...] and email addresses.
 func renderPlainEmail(body string) string {
 	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Italic(true) // sky blue
 	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))              // light purple
 
 	var result strings.Builder
 	for _, line := range strings.Split(body, "\n") {
-		// Colorize [N: ...] references
+		// Colorize [N: ...] link references
 		styled := linkRefRegex.ReplaceAllStringFunc(line, func(match string) string {
-			if strings.Contains(match, "@") {
-				return mailStyle.Render(match)
-			}
 			return linkStyle.Render(match)
+		})
+		// Colorize email addresses
+		styled = emailRegex.ReplaceAllStringFunc(styled, func(match string) string {
+			return mailStyle.Render(match)
 		})
 		result.WriteString(styled + "\n")
 	}
@@ -132,6 +131,7 @@ func renderPlainEmail(body string) string {
 }
 
 var linkRefRegex = regexp.MustCompile(`\[\d+: [^\]]+\]`)
+var emailRegex = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
 func (m Model) openAttachment(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.message.Attachments) {
