@@ -95,13 +95,14 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.FetchMessageMsg:
 		id := msg.ID
 		a.inbox.MarkRead(id) // optimistic local update
-		a.inbox.SetLoadingStatus("Opening message...")
 		// Check cache first
 		if cached, ok := a.msgCache[id]; ok {
+			a.inbox.SetStatus("")
 			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())
 			a.active = screenReader
 			return a, tea.Batch(a.reader.Init(), a.markAsRead(id))
 		}
+		a.inbox.SetLoadingStatus("Opening message...")
 		// Show loading state, fetch in background
 		a.loading = true
 		return a, tea.Batch(
@@ -192,6 +193,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.BackToInboxMsg:
 		a.active = screenInbox
 		a.status = ""
+		a.inbox.SetStatus("")
 		return a, nil
 
 	case common.SendResultMsg:
