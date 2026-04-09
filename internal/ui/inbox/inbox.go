@@ -633,11 +633,8 @@ func (m Model) View() string {
 
 	// 3. Search bar (if active or has query)
 	if m.searching {
-		searchBar := lipgloss.NewStyle().
-			Foreground(lipgloss.Color("#FFFFFF")).
-			Background(lipgloss.Color("#374151")).
+		searchBar := common.SearchInputStyle.
 			Width(m.width).
-			Padding(0, 1).
 			Render("/ " + m.searchInput.View())
 		b.WriteString(searchBar + "\n")
 	} else if m.searchQuery != "" {
@@ -708,7 +705,7 @@ func (m Model) View() string {
 		if i == fc.cursor {
 			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if fc.selected[msg.ID] {
-			line = lipgloss.NewStyle().Foreground(lipgloss.Color("#3B82F6")).Padding(0, 0).Width(0).Render(" " + line + " ")
+			line = common.CheckedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if msg.Unread {
 			line = common.UnreadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else {
