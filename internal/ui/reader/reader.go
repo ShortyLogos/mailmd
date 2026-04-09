@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/deric/mailmd/internal/gmail"
 	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
@@ -77,17 +77,16 @@ func (m *Model) initViewport(content string) {
 }
 
 
-// Init starts async body rendering.
+// Init starts body rendering (lightweight, no Glamour).
 func (m Model) Init() tea.Cmd {
 	msg := m.message
 	return func() tea.Msg {
-		// This runs in a goroutine — heavy rendering doesn't block the UI
 		body := msg.Body
 		if body == "" {
 			body = "(No message body)"
 		}
 
-		// Extract URLs and replace with numbered references
+		// Extract and number URLs (http/https)
 		var links []string
 		body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
 			links = append(links, rawURL)
@@ -95,23 +94,44 @@ func (m Model) Init() tea.Cmd {
 			return fmt.Sprintf("[%d: %s]", len(links), label)
 		})
 
+		// Extract and number mailto: links
+		body = mailtoRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
+			links = append(links, rawURL)
+			addr := strings.TrimPrefix(rawURL, "mailto:")
+			return fmt.Sprintf("[%d: %s]", len(links), addr)
+		})
+
+		// Wrap text
 		body = wrapText(body, 80)
 
-		r, err := glamour.NewTermRenderer(
-			glamour.WithAutoStyle(),
-			glamour.WithWordWrap(0),
-		)
-		if err != nil {
-			return bodyRenderedMsg{content: body, links: links}
-		}
-		rendered, err := r.Render(body)
-		if err != nil {
-			return bodyRenderedMsg{content: body, links: links}
-		}
+		// Lightweight styling — colorize link refs and mailto refs
+		rendered := renderPlainEmail(body)
 
 		return bodyRenderedMsg{content: rendered, links: links}
 	}
 }
+
+// renderPlainEmail applies minimal ANSI styling to plain text email body.
+// Colors link references [N: ...] and keeps everything else as-is.
+func renderPlainEmail(body string) string {
+	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Italic(true) // sky blue
+	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#A78BFA"))              // light purple
+
+	var result strings.Builder
+	for _, line := range strings.Split(body, "\n") {
+		// Colorize [N: ...] references
+		styled := linkRefRegex.ReplaceAllStringFunc(line, func(match string) string {
+			if strings.Contains(match, "@") {
+				return mailStyle.Render(match)
+			}
+			return linkStyle.Render(match)
+		})
+		result.WriteString(styled + "\n")
+	}
+	return result.String()
+}
+
+var linkRefRegex = regexp.MustCompile(`\[\d+: [^\]]+\]`)
 
 func (m Model) openAttachment(idx int) tea.Cmd {
 	if idx < 0 || idx >= len(m.message.Attachments) {
@@ -382,6 +402,7 @@ func (m Model) View() string {
 }
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
+var mailtoRegex = regexp.MustCompile(`mailto:[^\s<>\[\]()]+`)
 
 // compactURL returns a short readable form: "host/path..." truncated to maxLen.
 func compactURL(rawURL string, maxLen int) string {
