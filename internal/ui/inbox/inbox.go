@@ -54,6 +54,7 @@ type folderCache struct {
 	messages []gmail.MessageSummary
 	cursor   int
 	lastSync time.Time
+	selected map[string]bool // message ID → selected
 }
 
 // Model is the inbox Bubble Tea model.
@@ -93,12 +94,45 @@ func New(ctx context.Context, client gmail.Client) Model {
 // fc returns the active message cache — search results if searching, otherwise folder cache.
 func (m *Model) fc() *folderCache {
 	if m.searchQuery != "" && m.searchCache != nil {
+		if m.searchCache.selected == nil {
+			m.searchCache.selected = make(map[string]bool)
+		}
 		return m.searchCache
 	}
 	if m.cache[m.tabIdx] == nil {
-		m.cache[m.tabIdx] = &folderCache{}
+		m.cache[m.tabIdx] = &folderCache{selected: make(map[string]bool)}
+	}
+	if m.cache[m.tabIdx].selected == nil {
+		m.cache[m.tabIdx].selected = make(map[string]bool)
 	}
 	return m.cache[m.tabIdx]
+}
+
+// selectedIDs returns the IDs of all selected messages, or the cursor message if none selected.
+func (m *Model) selectedIDs(fc *folderCache) []string {
+	var ids []string
+	for id := range fc.selected {
+		if fc.selected[id] {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// selectedOrCursor returns IDs to act on: selected messages if any, otherwise the cursor message.
+func (m *Model) selectedOrCursor(fc *folderCache) (ids []string, subjects []string) {
+	for _, msg := range fc.messages {
+		if fc.selected[msg.ID] {
+			ids = append(ids, msg.ID)
+			subjects = append(subjects, msg.Subject)
+		}
+	}
+	if len(ids) == 0 && fc.cursor < len(fc.messages) {
+		msg := fc.messages[fc.cursor]
+		ids = []string{msg.ID}
+		subjects = []string{msg.Subject}
+	}
+	return
 }
 
 // Init loads messages for the default folder and starts polling.
@@ -138,24 +172,56 @@ func (m Model) fetchSearch(query string) tea.Cmd {
 	}
 }
 
-func (m Model) trashMessage(id string) tea.Cmd {
+
+func (m Model) deleteMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.TrashMessage(m.ctx, id)
-		return trashDoneMsg{err: err}
+		for _, id := range ids {
+			if err := m.client.DeleteMessage(m.ctx, id); err != nil {
+				return deleteDoneMsg{err: err}
+			}
+		}
+		return deleteDoneMsg{}
 	}
 }
 
-func (m Model) deleteMessage(id string) tea.Cmd {
+func (m Model) restoreMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.DeleteMessage(m.ctx, id)
-		return deleteDoneMsg{err: err}
+		for _, id := range ids {
+			if err := m.client.UntrashMessage(m.ctx, id); err != nil {
+				return restoreDoneMsg{err: err}
+			}
+		}
+		return restoreDoneMsg{}
 	}
 }
 
-func (m Model) restoreMessage(id string) tea.Cmd {
+func (m Model) trashMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
-		err := m.client.UntrashMessage(m.ctx, id)
-		return restoreDoneMsg{err: err}
+		for _, id := range ids {
+			if err := m.client.TrashMessage(m.ctx, id); err != nil {
+				return trashDoneMsg{err: err}
+			}
+		}
+		return trashDoneMsg{}
+	}
+}
+
+// optimisticRemove removes messages by ID from the folder cache and clears selection.
+func (m *Model) optimisticRemove(fc *folderCache, ids []string) {
+	idSet := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		idSet[id] = true
+	}
+	var remaining []gmail.MessageSummary
+	for _, msg := range fc.messages {
+		if !idSet[msg.ID] {
+			remaining = append(remaining, msg)
+		}
+	}
+	fc.messages = remaining
+	fc.selected = make(map[string]bool)
+	if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+		fc.cursor = len(fc.messages) - 1
 	}
 }
 
@@ -390,55 +456,101 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, common.Keys.Preview):
 			m.showPreview = !m.showPreview
 
-		case key.Matches(msg, common.Keys.Trash):
+		case key.Matches(msg, common.Keys.Select):
 			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
-				target := fc.messages[fc.cursor]
-				// Optimistically remove from list
-				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
-				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
-					fc.cursor--
+				id := fc.messages[fc.cursor].ID
+				fc.selected[id] = !fc.selected[id]
+				if !fc.selected[id] {
+					delete(fc.selected, id)
 				}
+				// Move cursor down after selecting
+				if fc.cursor < len(fc.messages)-1 {
+					fc.cursor++
+				}
+			}
+
+		case key.Matches(msg, common.Keys.SelectAll):
+			if len(fc.messages) > 0 {
+				// Toggle: if all selected → deselect all, otherwise select all
+				allSelected := true
+				for _, msg := range fc.messages {
+					if !fc.selected[msg.ID] {
+						allSelected = false
+						break
+					}
+				}
+				if allSelected {
+					fc.selected = make(map[string]bool)
+				} else {
+					for _, msg := range fc.messages {
+						fc.selected[msg.ID] = true
+					}
+				}
+			}
+
+		case key.Matches(msg, common.Keys.Trash):
+			ids, subjects := m.selectedOrCursor(fc)
+			if len(ids) > 0 {
+				// Optimistically remove from list
+				m.optimisticRemove(fc, ids)
 
 				label := m.currentLabelID()
 				switch label {
 				case "TRASH", "DRAFT":
-					m.status = fmt.Sprintf("Deleting \"%s\"...", truncate(target.Subject, 40))
-					return m, m.deleteMessage(target.ID)
+					if len(ids) == 1 {
+						m.status = fmt.Sprintf("Deleting \"%s\"...", truncate(subjects[0], 40))
+					} else {
+						m.status = fmt.Sprintf("Deleting %d messages...", len(ids))
+					}
+					return m, m.deleteMessages(ids)
 				default:
-					m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(target.Subject, 40))
-					return m, m.trashMessage(target.ID)
+					if len(ids) == 1 {
+						m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(subjects[0], 40))
+					} else {
+						m.status = fmt.Sprintf("Trashing %d messages...", len(ids))
+					}
+					return m, m.trashMessages(ids)
 				}
 			}
 
 		case key.Matches(msg, common.Keys.Restore):
 			label := m.currentLabelID()
-			if label == "TRASH" && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
-				target := fc.messages[fc.cursor]
-				m.status = fmt.Sprintf("Restoring \"%s\"...", truncate(target.Subject, 40))
-				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
-				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
-					fc.cursor--
+			if label == "TRASH" {
+				ids, subjects := m.selectedOrCursor(fc)
+				if len(ids) > 0 {
+					m.optimisticRemove(fc, ids)
+					if len(ids) == 1 {
+						m.status = fmt.Sprintf("Restoring \"%s\"...", truncate(subjects[0], 40))
+					} else {
+						m.status = fmt.Sprintf("Restoring %d messages...", len(ids))
+					}
+					return m, m.restoreMessages(ids)
 				}
-				return m, m.restoreMessage(target.ID)
 			}
 		}
 	}
 	return m, nil
 }
 
-func (m Model) keybindsForFolder() string {
-	base := " j/k=nav  o=open  c=compose"
+func (m Model) keybindsForFolder(fc *folderCache) string {
+	sel := ""
+	if len(fc.selected) > 0 {
+		sel = fmt.Sprintf(" [%d selected]", len(fc.selected))
+	}
+
+	base := " j/k=nav  space=select  a=all" + sel
 	label := m.currentLabelID()
+	suffix := "  /=search  R=refresh  tab=folder  q=quit"
 
 	switch label {
 	case "TRASH":
-		return base + "  d=delete  u=restore  p=preview  /=search  R=refresh  tab=folder  q=quit"
+		return base + "  d=delete  u=restore" + suffix
 	case "DRAFT":
-		return base + "  d=delete  p=preview  /=search  R=refresh  tab=folder  q=quit"
+		return base + "  d=delete" + suffix
 	case "SENT":
-		return base + "  d=trash  f=forward  p=preview  /=search  R=refresh  tab=folder  q=quit"
+		return base + "  d=trash  f=forward" + suffix
 	default: // INBOX
-		return base + "  d=trash  r=reply  f=forward  p=preview  /=search  R=refresh  tab=folder  q=quit"
+		return base + "  d=trash" + suffix
 	}
 }
 
@@ -537,8 +649,8 @@ func (m Model) View() string {
 		b.WriteString(searchBar + "\n")
 	}
 
-	// 4. Keybinds bar (appended at the bottom) — adapts to active folder
-	keybindText := m.keybindsForFolder()
+	// 4. Keybinds bar (appended at the bottom) — adapts to active folder and selection
+	keybindText := m.keybindsForFolder(fc)
 	keybinds := common.StatusBar.Width(m.width).Render(keybindText)
 
 	contentHeight := m.contentHeight()
@@ -576,13 +688,27 @@ func (m Model) View() string {
 		end = len(fc.messages)
 	}
 
+	hasSelection := len(fc.selected) > 0
 	for i := start; i < end; i++ {
 		msg := fc.messages[i]
-		line := formatMessageLine(msg, listWidth-2)
-		// Pad line to exact width with spaces, then apply style (no lipgloss Width/Padding)
+		// Selection checkbox prefix
+		checkW := 0
+		check := ""
+		if hasSelection {
+			checkW = 2
+			if fc.selected[msg.ID] {
+				check = "● "
+			} else {
+				check = "  "
+			}
+		}
+		line := formatMessageLine(msg, listWidth-2-checkW)
+		line = check + line
 		line = runewidthPadRight(line, listWidth-2)
 		if i == fc.cursor {
 			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
+		} else if fc.selected[msg.ID] {
+			line = lipgloss.NewStyle().Foreground(common.Accent).Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else if msg.Unread {
 			line = common.UnreadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
 		} else {

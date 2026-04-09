@@ -180,7 +180,12 @@ func (c *gmailClient) TrashMessage(ctx context.Context, id string) error {
 }
 
 func (c *gmailClient) UntrashMessage(ctx context.Context, id string) error {
-	_, err := c.svc.Users.Messages.Untrash(c.user, id).Context(ctx).Do()
+	if _, err := c.svc.Users.Messages.Untrash(c.user, id).Context(ctx).Do(); err != nil {
+		return err
+	}
+	// Untrash removes from Trash but doesn't restore the INBOX label — add it back
+	req := &gapi.ModifyMessageRequest{AddLabelIds: []string{"INBOX"}}
+	_, err := c.svc.Users.Messages.Modify(c.user, id, req).Context(ctx).Do()
 	return err
 }
 

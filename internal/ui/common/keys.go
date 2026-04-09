@@ -3,9 +3,9 @@ package common
 import "github.com/charmbracelet/bubbles/key"
 
 type KeyMap struct {
-	Up, Down, Open, Back, Compose, Reply, Forward, Trash   key.Binding
-	Preview, BPreview, NextTab, PrevTab, Send, Edit         key.Binding
-	Refresh, Restore, Quit, Help                            key.Binding
+	Up, Down, Open, Back, Compose, Reply, Forward, Trash    key.Binding
+	Preview, BPreview, NextTab, PrevTab, Send, Edit          key.Binding
+	Refresh, Restore, Select, SelectAll, Quit, Help          key.Binding
 }
 
 var Keys = KeyMap{
@@ -24,7 +24,9 @@ var Keys = KeyMap{
 	Send:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "send")),
 	Edit:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
 	Refresh:  key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
-	Restore:  key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "restore")),
-	Quit:     key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Restore:   key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "restore")),
+	Select:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "select")),
+	SelectAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all")),
+	Quit:      key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 }
