@@ -95,7 +95,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.FetchMessageMsg:
 		id := msg.ID
 		a.inbox.MarkRead(id) // optimistic local update
-		a.inbox.SetStatus("Opening message...")
+		a.inbox.SetLoadingStatus("Opening message...")
 		// Check cache first
 		if cached, ok := a.msgCache[id]; ok {
 			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())

@@ -67,10 +67,11 @@ type Model struct {
 	height      int
 	tabIdx      int
 	cache       map[int]*folderCache // per-folder cache keyed by tabIdx
-	syncing     bool                 // true when fetching in background
-	err         string
-	status      string
-	showPreview bool
+	syncing       bool                 // true when fetching in background
+	err           string
+	status        string
+	statusLoading bool                 // true to show spinner next to status
+	showPreview   bool
 
 	// Search
 	searching   bool             // true when search input is visible
@@ -261,6 +262,13 @@ func (m Model) TabIdx() int {
 // SetStatus sets the action text in the status line.
 func (m *Model) SetStatus(text string) {
 	m.status = text
+	m.statusLoading = false
+}
+
+// SetLoadingStatus sets the action text with a spinner prefix.
+func (m *Model) SetLoadingStatus(text string) {
+	m.status = text
+	m.statusLoading = true
 }
 
 // MarkRead optimistically marks a message as read in the local cache.
@@ -754,7 +762,11 @@ func (m Model) View() string {
 	if m.jumping {
 		rightParts = common.SyncingStyle.Render(fmt.Sprintf("Go to: %s_", m.jumpInput))
 	} else if m.status != "" {
-		rightParts = common.MutedStyle.Render(m.status)
+		if m.statusLoading {
+			rightParts = m.spinner.View() + " " + common.SyncingStyle.Render(m.status)
+		} else {
+			rightParts = common.MutedStyle.Render(m.status)
+		}
 	}
 	if m.searchQuery != "" {
 		if rightParts != "" {
