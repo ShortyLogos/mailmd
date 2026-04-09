@@ -669,7 +669,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 				label := m.currentLabelID()
 				switch label {
-				case "TRASH", "DRAFT":
+				case "TRASH":
 					if len(ids) == 1 {
 						m.status = fmt.Sprintf("Deleting \"%s\"...", truncate(subjects[0], 40))
 					} else {
@@ -721,7 +721,7 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 	case "TRASH":
 		return base + "  d=delete  u=restore" + suffix
 	case "DRAFT":
-		return base + "  d=delete" + suffix
+		return base + "  d=trash" + suffix
 	case "SENT":
 		extra := "  d=trash"
 		if noSel {
