@@ -57,8 +57,20 @@ type deleteDoneMsg struct{ err error }
 // restoreDoneMsg signals a restore/untrash completed.
 type restoreDoneMsg struct{ err error }
 
+// toggleReadDoneMsg signals a mark read/unread toggle completed.
+type toggleReadDoneMsg struct{ err error }
+
+// blockDoneMsg signals a block sender operation completed.
+type blockDoneMsg struct{ err error }
+
 // pollTickMsg triggers a background refresh.
 type pollTickMsg struct{}
+
+// attachmentEnrichMsg carries background attachment detection results.
+type attachmentEnrichMsg struct {
+	attachments map[string]bool // message ID → has real attachments
+	tabIdx      int             // -1 for search results
+}
 
 // folderCache stores per-folder state.
 type folderCache struct {
@@ -83,6 +95,8 @@ type Model struct {
 	status        string
 	statusLoading bool                 // true to show spinner next to status
 	showPreview   bool
+	AccountName   string               // current account display name (shown in tab bar)
+	AccountEmail  string               // current account email (shown in tab bar)
 
 	// Search
 	searching   bool             // true when search input is visible
@@ -173,9 +187,6 @@ func (m Model) fetchMessages() tea.Cmd {
 	tabIdx := m.tabIdx
 	labelID := folders[tabIdx].labelID
 	query := ""
-	if labelID == "INBOX" {
-		query = "category:primary"
-	}
 	return func() tea.Msg {
 		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
 		if err != nil {
@@ -213,9 +224,6 @@ func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
 	tabIdx := m.tabIdx
 	labelID := folders[tabIdx].labelID
 	query := ""
-	if labelID == "INBOX" {
-		query = "category:primary"
-	}
 	return func() tea.Msg {
 		list, err := m.client.ListMessages(m.ctx, labelID, query, pageToken)
 		if err != nil {
@@ -225,18 +233,21 @@ func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
 	}
 }
 
+func (m Model) enrichAttachments(msgs []gmail.MessageSummary, tabIdx int) tea.Cmd {
+	ids := make([]string, len(msgs))
+	for i, msg := range msgs {
+		ids[i] = msg.ID
+	}
+	return func() tea.Msg {
+		result, _ := m.client.CheckAttachments(m.ctx, ids)
+		return attachmentEnrichMsg{attachments: result, tabIdx: tabIdx}
+	}
+}
+
 func (m Model) deleteMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
-		errs := make(chan error, len(ids))
-		for _, id := range ids {
-			go func(id string) { errs <- m.client.DeleteMessage(m.ctx, id) }(id)
-		}
-		for range ids {
-			if err := <-errs; err != nil {
-				return deleteDoneMsg{err: err}
-			}
-		}
-		return deleteDoneMsg{}
+		err := m.client.DeleteMessages(m.ctx, ids)
+		return deleteDoneMsg{err: err}
 	}
 }
 
@@ -257,16 +268,20 @@ func (m Model) restoreMessages(ids []string) tea.Cmd {
 
 func (m Model) trashMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
-		errs := make(chan error, len(ids))
-		for _, id := range ids {
-			go func(id string) { errs <- m.client.TrashMessage(m.ctx, id) }(id)
+		err := m.client.TrashMessages(m.ctx, ids)
+		return trashDoneMsg{err: err}
+	}
+}
+
+func (m Model) toggleRead(id string, markUnread bool) tea.Cmd {
+	return func() tea.Msg {
+		var err error
+		if markUnread {
+			err = m.client.MoveMessage(m.ctx, id, []string{"UNREAD"}, nil)
+		} else {
+			err = m.client.MoveMessage(m.ctx, id, nil, []string{"UNREAD"})
 		}
-		for range ids {
-			if err := <-errs; err != nil {
-				return trashDoneMsg{err: err}
-			}
-		}
-		return trashDoneMsg{}
+		return toggleReadDoneMsg{err: err}
 	}
 }
 
@@ -284,7 +299,9 @@ func (m *Model) optimisticRemove(fc *folderCache, ids []string) {
 	}
 	fc.messages = remaining
 	fc.selected = make(map[string]bool)
-	if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+	if len(fc.messages) == 0 {
+		fc.cursor = 0
+	} else if fc.cursor >= len(fc.messages) {
 		fc.cursor = len(fc.messages) - 1
 	}
 }
@@ -327,7 +344,9 @@ func (m *Model) OptimisticRemove(id string) {
 	for i, msg := range fc.messages {
 		if msg.ID == id {
 			fc.messages = append(fc.messages[:i], fc.messages[i+1:]...)
-			if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+			if len(fc.messages) == 0 {
+				fc.cursor = 0
+			} else if fc.cursor >= len(fc.messages) {
 				fc.cursor = len(fc.messages) - 1
 			}
 			return
@@ -369,6 +388,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.err = ""
 			}
 			m.syncing = false
+			if msg.err == nil && len(msg.messages) > 0 {
+				return m, m.enrichAttachments(msg.messages, -1)
+			}
 			return m, nil
 		}
 
@@ -408,6 +430,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.err = ""
 			}
 		}
+		// Fire background attachment enrichment
+		if msg.err == nil && len(msg.messages) > 0 {
+			return m, m.enrichAttachments(msg.messages, msg.tabIdx)
+		}
 
 	case moreMessagesMsg:
 		if m.cache[msg.tabIdx] == nil {
@@ -420,6 +446,27 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		target.messages = append(target.messages, msg.messages...)
 		target.nextPageToken = msg.nextPageToken
+		if len(msg.messages) > 0 {
+			return m, m.enrichAttachments(msg.messages, msg.tabIdx)
+		}
+
+	case attachmentEnrichMsg:
+		if msg.tabIdx == -1 {
+			if m.searchCache != nil {
+				for i := range m.searchCache.messages {
+					if has, ok := msg.attachments[m.searchCache.messages[i].ID]; ok {
+						m.searchCache.messages[i].HasAttachments = has
+					}
+				}
+			}
+		} else if m.cache[msg.tabIdx] != nil {
+			target := m.cache[msg.tabIdx]
+			for i := range target.messages {
+				if has, ok := msg.attachments[target.messages[i].ID]; ok {
+					target.messages[i].HasAttachments = has
+				}
+			}
+		}
 
 	case trashDoneMsg:
 		if msg.err != nil {
@@ -448,12 +495,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.syncing = true
 		return m, m.fetchMessages()
 
+	case toggleReadDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+		}
+
 	case pollTickMsg:
 		if m.searchQuery == "" {
 			m.syncing = true
 			return m, tea.Batch(m.fetchMessages(), m.pollTick())
 		}
 		return m, m.pollTick() // don't poll while searching
+
+	case blockDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+		} else {
+			m.status = "Sender blocked — future emails will be trashed."
+		}
 
 	case common.StatusMsg:
 		m.status = msg.Text
@@ -490,10 +549,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 				row := msg.Y - headerRows
 				contentHeight := m.contentHeight()
-				start := 0
-				if fc.cursor >= contentHeight {
-					start = fc.cursor - contentHeight + 1
-				}
+				start := viewStart(fc.cursor, contentHeight, len(fc.messages))
 				idx := start + row
 				if idx >= 0 && idx < len(fc.messages) {
 					fc.cursor = idx
@@ -624,7 +680,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.err = ""
 			return m, m.fetchMessages()
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("/"))):
+		case key.Matches(msg, key.NewBinding(key.WithKeys("/", "f"))):
 			m.searching = true
 			m.searchInput.SetValue("")
 			m.searchInput.Focus()
@@ -734,6 +790,33 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					return m, m.restoreMessages(ids)
 				}
 			}
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("m"))):
+			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				cur := fc.messages[fc.cursor]
+				if cur.Unread {
+					fc.messages[fc.cursor].Unread = false
+					m.status = "Marked as read"
+					return m, m.toggleRead(cur.ID, false)
+				} else {
+					fc.messages[fc.cursor].Unread = true
+					m.status = "Marked as unread"
+					return m, m.toggleRead(cur.ID, true)
+				}
+			}
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("b"))):
+			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				from := fc.messages[fc.cursor].From
+				email := extractEmail(from)
+				if email != "" {
+					m.status = fmt.Sprintf("Blocking %s...", email)
+					return m, func() tea.Msg {
+						err := m.client.BlockSender(m.ctx, email)
+						return blockDoneMsg{err: err}
+					}
+				}
+			}
 		}
 	}
 	return m, nil
@@ -747,27 +830,37 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 
 	base := " j/k=nav  space=select  a=all" + sel
 	label := m.currentLabelID()
-	suffix := "  /=search  R=refresh  tab=folder  q=quit"
+	suffix := "  f=search  R=refresh  tab=folder  K=keys  q=quit"
 
 	noSel := len(fc.selected) == 0
 
+	// Show m=mark read/unread based on current message state
+	markHint := ""
+	if noSel && fc.cursor < len(fc.messages) {
+		if fc.messages[fc.cursor].Unread {
+			markHint = "  m=read"
+		} else {
+			markHint = "  m=unread"
+		}
+	}
+
 	switch label {
 	case "TRASH":
-		return base + "  d=delete  u=restore" + suffix
+		return base + "  d=delete  u=restore" + markHint + suffix
 	case "DRAFT":
-		return base + "  d=trash" + suffix
+		return base + "  d=trash" + markHint + suffix
 	case "SENT":
-		extra := "  d=trash"
-		if noSel {
-			extra += "  r=reply  f=forward"
-		}
-		return base + extra + suffix
-	default: // INBOX
 		extra := "  d=trash"
 		if noSel {
 			extra += "  r=reply"
 		}
-		return base + extra + suffix
+		return base + extra + markHint + suffix
+	default: // INBOX
+		extra := "  d=trash  b=block"
+		if noSel {
+			extra += "  r=reply"
+		}
+		return base + extra + markHint + suffix
 	}
 }
 
@@ -800,7 +893,21 @@ func (m Model) View() string {
 			tabs[i] = common.InactiveTab.Render(f.name)
 		}
 	}
-	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
+	tabContent := strings.Join(tabs, "")
+	acctDisplay := m.AccountEmail
+	if acctDisplay == "" {
+		acctDisplay = m.AccountName
+	}
+	if acctDisplay != "" {
+		acctLabel := lipgloss.NewStyle().Foreground(common.Muted).Render(acctDisplay + "  ")
+		tabsW := lipgloss.Width(tabContent)
+		acctW := lipgloss.Width(acctLabel)
+		gap := m.width - tabsW - acctW - 2 // -2 for border padding
+		if gap > 0 {
+			tabContent += strings.Repeat(" ", gap) + acctLabel
+		}
+	}
+	tabRow := common.TabBar.Width(m.width).Render(tabContent)
 	b.WriteString(tabRow + "\n")
 
 	// 2. Sync status line
@@ -821,8 +928,8 @@ func (m Model) View() string {
 	if fromW < 12 {
 		fromW = 12
 	}
-	// Fixed left zone = 1(pad) + numW+1(numCol) + 2(check) + 2(unread+space) + fromW + 2(gap)
-	leftZoneW := 1 + numW + 1 + 2 + 2 + fromW + 2
+	// Fixed left zone = 1(pad) + numW+1(numCol) + 2(check) + 2(unread+space) + fromW + 2(gap) + 2(attach) + 1(gap)
+	leftZoneW := 1 + numW + 1 + 2 + 2 + fromW + 2 + 2 + 1
 
 	// Build left content: count + sync (icon is always 1 char to prevent shift)
 	syncText := ""
@@ -891,6 +998,11 @@ func (m Model) View() string {
 
 	// 4. Keybinds bar (appended at the bottom) — adapts to active folder and selection
 	keybindText := m.keybindsForFolder(fc)
+	// Truncate to prevent line wrapping (StatusBar has padding(0,1) = 2 chars + border)
+	maxKeyW := m.width - 4
+	if maxKeyW > 0 && rw.StringWidth(keybindText) > maxKeyW {
+		keybindText = rw.Truncate(keybindText, maxKeyW, "…")
+	}
 	keybinds := common.StatusBar.Width(m.width).Render(keybindText)
 
 	contentHeight := m.contentHeight()
@@ -919,10 +1031,7 @@ func (m Model) View() string {
 	visibleRows := contentHeight
 
 	var listLines []string
-	start := 0
-	if fc.cursor >= visibleRows {
-		start = fc.cursor - visibleRows + 1
-	}
+	start := viewStart(fc.cursor, visibleRows, len(fc.messages))
 	end := start + visibleRows
 	if end > len(fc.messages) {
 		end = len(fc.messages)
@@ -1109,4 +1218,40 @@ func truncate(s string, width int) string {
 		return ""
 	}
 	return rw.Truncate(s, width, "…")
+}
+
+// viewStart computes the first visible message index, keeping a scroll margin
+// of 10 messages so the cursor stays away from the viewport edges.
+func viewStart(cursor, visibleRows, totalMessages int) int {
+	const scrollOff = 10
+	off := scrollOff
+	if off > visibleRows/2 {
+		off = visibleRows / 2
+	}
+	start := cursor - visibleRows + 1 + off
+	if start < 0 {
+		start = 0
+	}
+	maxStart := totalMessages - visibleRows
+	if maxStart < 0 {
+		maxStart = 0
+	}
+	if start > maxStart {
+		start = maxStart
+	}
+	return start
+}
+
+// extractEmail extracts the email address from a From header like "Name <email@example.com>".
+func extractEmail(from string) string {
+	if start := strings.Index(from, "<"); start >= 0 {
+		if end := strings.Index(from[start:], ">"); end >= 0 {
+			return from[start+1 : start+end]
+		}
+	}
+	// Might be a bare email address
+	if strings.Contains(from, "@") {
+		return strings.TrimSpace(from)
+	}
+	return ""
 }

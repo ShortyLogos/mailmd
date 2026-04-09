@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -36,8 +37,11 @@ type Model struct {
 	height          int
 	ready           bool
 	tabIdx          int      // active folder tab (for display only)
+	accountName     string   // current account name (for tab bar)
+	accountEmail    string   // current account email (for tab bar)
 	links           []string // extracted URLs, indexed from 1
-	goLink          bool     // true when waiting for link number after 'g'
+	linkJumping     bool     // true when typing a link number
+	linkJumpInput   string   // accumulated digits for link number
 	renderedContent string   // cached rendered body for resize
 }
 
@@ -48,14 +52,16 @@ type bodyRenderedMsg struct {
 	links   []string
 }
 
-func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int) Model {
+func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int, accountName, accountEmail string) Model {
 	m := Model{
-		ctx:     ctx,
-		client:  client,
-		message: msg,
-		width:   width,
-		height:  height,
-		tabIdx:  tabIdx,
+		ctx:          ctx,
+		client:       client,
+		message:      msg,
+		width:        width,
+		height:       height,
+		tabIdx:       tabIdx,
+		accountName:  accountName,
+		accountEmail: accountEmail,
 	}
 	m.initViewport("  Loading content...")
 	return m
@@ -264,19 +270,46 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
-		// Link open mode: g was pressed, waiting for number
-		if m.goLink {
-			m.goLink = false
-			if len(msg.String()) == 1 {
-				c := msg.String()[0]
-				if c >= '1' && c <= '9' {
-					idx := int(c - '1')
-					if idx < len(m.links) {
-						openFile(m.links[idx])
-					}
+		// Number input mode: digits accumulate, then l=link / a=attachment
+		if m.linkJumping {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("l"))):
+				n, _ := strconv.Atoi(m.linkJumpInput)
+				m.linkJumping = false
+				m.linkJumpInput = ""
+				if n > 0 && n <= len(m.links) {
+					openFile(m.links[n-1])
 				}
+				return m, nil
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				n, _ := strconv.Atoi(m.linkJumpInput)
+				m.linkJumping = false
+				m.linkJumpInput = ""
+				if n > 0 && n <= len(m.message.Attachments) {
+					return m, m.openAttachment(n - 1)
+				}
+				return m, nil
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.linkJumping = false
+				m.linkJumpInput = ""
+				return m, nil
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if len(m.linkJumpInput) > 0 {
+					m.linkJumpInput = m.linkJumpInput[:len(m.linkJumpInput)-1]
+				}
+				if len(m.linkJumpInput) == 0 {
+					m.linkJumping = false
+				}
+				return m, nil
+			default:
+				if len(msg.String()) == 1 && msg.String()[0] >= '0' && msg.String()[0] <= '9' {
+					m.linkJumpInput += msg.String()
+					return m, nil
+				}
+				// Non-digit/non-action cancels
+				m.linkJumping = false
+				m.linkJumpInput = ""
 			}
-			return m, nil
 		}
 
 		switch {
@@ -323,18 +356,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if len(msg.String()) == 1 {
 				c := msg.String()[0]
 
-				// g = open link mode
-				if c == 'g' && len(m.links) > 0 {
-					m.goLink = true
+				// Digit starts number input mode (N+l=link, N+a=attachment)
+				if c >= '1' && c <= '9' {
+					m.linkJumping = true
+					m.linkJumpInput = string(c)
 					return m, nil
-				}
-
-				// Number keys open attachments (1-9)
-				if c >= '1' && c <= '9' && len(m.message.Attachments) > 0 {
-					idx := int(c - '1')
-					if idx < len(m.message.Attachments) {
-						return m, m.openAttachment(idx)
-					}
 				}
 
 				// I = open all images
@@ -368,7 +394,21 @@ func (m Model) View() string {
 			tabs[i] = common.InactiveTab.Render(f)
 		}
 	}
-	b.WriteString(common.TabBar.Width(m.width).Render(strings.Join(tabs, "")) + "\n")
+	tabContent := strings.Join(tabs, "")
+	acctDisplay := m.accountEmail
+	if acctDisplay == "" {
+		acctDisplay = m.accountName
+	}
+	if acctDisplay != "" {
+		acctLabel := lipgloss.NewStyle().Foreground(common.Muted).Render(acctDisplay + "  ")
+		tabsW := lipgloss.Width(tabContent)
+		acctW := lipgloss.Width(acctLabel)
+		gap := m.width - tabsW - acctW - 2
+		if gap > 0 {
+			tabContent += strings.Repeat(" ", gap) + acctLabel
+		}
+	}
+	b.WriteString(common.TabBar.Width(m.width).Render(tabContent) + "\n")
 
 	// Header block — truncate values to terminal width to prevent line wrapping
 	maxValW := m.width - 10 // "Subject: " is 9 chars + margin
@@ -402,26 +442,25 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View())
 
 	// Status bar
-	status := " esc=back  r=reply  f=forward  d=trash  P=browser  j/k=scroll  q=quit"
-	if len(m.links) > 0 {
-		if m.goLink {
-			status = " Press 1-9 to open link (esc=cancel)" + strings.Repeat(" ", 20) // pad to prevent flicker
-		} else {
-			status = " esc=back  r=reply  f=forward  P=browser  g=open link  j/k=scroll  q=quit"
+	status := " esc=back  r=reply  f=forward  d=trash  P=browser  j/k=scroll  K=keys  q=quit"
+	if m.linkJumping {
+		hints := ""
+		if len(m.links) > 0 {
+			hints += " l=link"
 		}
-	}
-	if len(m.message.Attachments) > 0 {
-		status += "  1-9=open attachment"
-		hasImages := false
-		for _, att := range m.message.Attachments {
-			if isImage(att.MimeType) {
-				hasImages = true
-				break
-			}
+		if len(m.message.Attachments) > 0 {
+			hints += " enter=attach"
 		}
-		if hasImages {
-			status += "  I=open all images"
+		status = fmt.Sprintf(" %s_%s  esc=cancel", m.linkJumpInput, hints) + strings.Repeat(" ", 20)
+	} else {
+		extras := ""
+		if len(m.links) > 0 {
+			extras += "  N+l=link"
 		}
+		if len(m.message.Attachments) > 0 {
+			extras += "  N+enter=attach  I=images"
+		}
+		status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 	}
 	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
 	b.WriteString(common.StatusBar.Width(m.width).Render(status))
