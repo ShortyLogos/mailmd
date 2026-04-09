@@ -18,6 +18,7 @@ import (
 	"github.com/deric/mailmd/internal/gmail"
 	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
+	rw "github.com/mattn/go-runewidth"
 )
 
 // attachmentOpenedMsg signals an attachment was saved and opened.
@@ -276,10 +277,17 @@ func (m Model) View() string {
 	}
 	b.WriteString(common.TabBar.Width(m.width).Render(strings.Join(tabs, "")) + "\n")
 
-	// Header block
-	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("From:    %s", m.message.From)) + "\n")
-	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("To:      %s", m.message.To)) + "\n")
-	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("Subject: %s", m.message.Subject)) + "\n")
+	// Header block — truncate values to terminal width to prevent line wrapping
+	maxValW := m.width - 10 // "Subject: " is 9 chars + margin
+	truncVal := func(s string) string {
+		if rw.StringWidth(s) > maxValW {
+			return rw.Truncate(s, maxValW, "...")
+		}
+		return s
+	}
+	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("From:    %s", truncVal(m.message.From))) + "\n")
+	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("To:      %s", truncVal(m.message.To))) + "\n")
+	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("Subject: %s", truncVal(m.message.Subject))) + "\n")
 	dateStr := ""
 	if !m.message.Date.IsZero() {
 		dateStr = m.message.Date.Format("Mon, 02 Jan 2006 15:04:05 MST")
