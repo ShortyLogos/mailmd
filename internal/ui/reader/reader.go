@@ -79,11 +79,12 @@ func (m *Model) renderBody() string {
 		body = "(No message body)"
 	}
 
-	// Extract URLs and replace with numbered references [1], [2], etc.
+	// Extract URLs and replace with inline numbered references
 	m.links = nil
 	body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
 		m.links = append(m.links, rawURL)
-		return fmt.Sprintf("[%d]", len(m.links))
+		label := compactURL(rawURL, 40)
+		return fmt.Sprintf("[%d: %s]", len(m.links), label)
 	})
 
 	// Wrap text at 80 chars
@@ -100,15 +101,6 @@ func (m *Model) renderBody() string {
 	if err != nil {
 		return markdown.ConvertPlain(body)
 	}
-
-	// Append link references at the bottom
-	if len(m.links) > 0 {
-		rendered += "\n  Links:\n"
-		for i, link := range m.links {
-			rendered += fmt.Sprintf("  [%d] %s\n", i+1, link)
-		}
-	}
-
 	return rendered
 }
 
@@ -373,6 +365,21 @@ func (m Model) View() string {
 }
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
+
+// compactURL returns a short readable form: "host/path..." truncated to maxLen.
+func compactURL(rawURL string, maxLen int) string {
+	// Strip scheme
+	s := rawURL
+	if i := strings.Index(s, "://"); i >= 0 {
+		s = s[i+3:]
+	}
+	// Strip www.
+	s = strings.TrimPrefix(s, "www.")
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-3] + "..."
+}
 
 
 // wrapText wraps lines at maxWidth on word boundaries, but leaves URLs intact.
