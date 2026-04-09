@@ -18,7 +18,7 @@ var (
 // --- Styles ---
 var (
 	// Tabs
-	ActiveTab   = lipgloss.NewStyle().Bold(true).Foreground(Primary).Padding(0, 2)
+	ActiveTab   = lipgloss.NewStyle().Bold(true).Foreground(White).Background(Primary).Padding(0, 2)
 	InactiveTab = lipgloss.NewStyle().Foreground(Secondary).Padding(0, 2)
 	TabBar      = lipgloss.NewStyle().BorderStyle(lipgloss.NormalBorder()).BorderBottom(true).BorderForeground(Secondary)
 

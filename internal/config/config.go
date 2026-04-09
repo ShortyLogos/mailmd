@@ -69,7 +69,23 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
+	cfg.Accounts = deduplicateAccounts(cfg.Accounts)
 	return cfg, nil
+}
+
+// deduplicateAccounts removes duplicate accounts (by email), keeping the last occurrence.
+func deduplicateAccounts(accounts []Account) []Account {
+	seen := make(map[string]int) // email → index in result
+	var result []Account
+	for _, a := range accounts {
+		if idx, ok := seen[a.Email]; ok {
+			result[idx] = a // update with latest name
+		} else {
+			seen[a.Email] = len(result)
+			result = append(result, a)
+		}
+	}
+	return result
 }
 
 func LoadOrCreate(path string) (Config, error) {
@@ -84,8 +100,15 @@ func LoadOrCreate(path string) (Config, error) {
 	return cfg, nil
 }
 
-// AddAccount appends a new account and persists the config.
+// AddAccount adds an account and persists the config.
+// If an account with the same email already exists, it updates the name.
 func AddAccount(path string, cfg *Config, name, email string) error {
+	for i, a := range cfg.Accounts {
+		if a.Email == email {
+			cfg.Accounts[i].Name = name
+			return Save(path, *cfg)
+		}
+	}
 	cfg.Accounts = append(cfg.Accounts, Account{Name: name, Email: email})
 	return Save(path, *cfg)
 }

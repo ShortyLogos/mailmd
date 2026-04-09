@@ -292,27 +292,27 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		label := a.active.inbox.CurrentLabelID()
 		if label == "TRASH" {
 			a.active.inbox.SetStatus("Deleting message...")
-			return a, func() tea.Msg {
+			return a, tea.Batch(a.active.inbox.SpinnerTick(), func() tea.Msg {
 				err := a.active.client.DeleteMessage(a.ctx, id)
 				if err != nil {
 					return common.StatusMsg{Text: "Error: " + err.Error()}
 				}
 				return common.StatusMsg{Text: "Message permanently deleted."}
-			}
+			})
 		}
 		a.active.inbox.SetStatus("Trashing message...")
-		return a, func() tea.Msg {
+		return a, tea.Batch(a.active.inbox.SpinnerTick(), func() tea.Msg {
 			err := a.active.client.TrashMessage(a.ctx, id)
 			if err != nil {
 				return common.StatusMsg{Text: "Error: " + err.Error()}
 			}
 			return common.StatusMsg{Text: "Message trashed."}
-		}
+		})
 
 	case common.BackToInboxMsg:
 		a.screen = screenInbox
 		a.active.inbox.SetStatus("")
-		return a, nil
+		return a, a.active.inbox.SpinnerTick()
 
 	case common.SendResultMsg:
 		a.screen = screenInbox
@@ -349,7 +349,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a.updateSwitcher(kmsg)
 		}
 		// S opens switcher from inbox (only when not in search/jump/compose)
-		if a.screen == screenInbox && kmsg.String() == "S" {
+		if a.screen == screenInbox && kmsg.String() == "S" && !a.active.inbox.IsInputActive() {
 			a.showSwitcher = true
 			a.switcherCursor = 0
 			a.addingAccount = false
@@ -490,6 +490,21 @@ func (a App) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
+
+	default:
+		// Number keys 1-9 jump to and select the corresponding account
+		s := msg.String()
+		if len(s) == 1 && s[0] >= '1' && s[0] <= '9' {
+			idx := int(s[0]-'0') - 1
+			if idx < len(a.cfg.Accounts) {
+				acct := a.cfg.Accounts[idx]
+				if acct.Email == a.active.email {
+					a.showSwitcher = false
+					return a, nil
+				}
+				return a.switchToAccount(acct)
+			}
+		}
 	}
 	return a, nil
 }
@@ -508,7 +523,7 @@ func (a App) switchToAccount(acct config.Account) (tea.Model, tea.Cmd) {
 			sizeCmd := func() tea.Msg { return tea.WindowSizeMsg{Width: a.width, Height: a.height} }
 			return a, tea.Batch(a.active.inbox.Init(), sizeCmd)
 		}
-		return a, nil
+		return a, a.active.inbox.SpinnerTick()
 	}
 
 	// Not cached — authenticate and create state
@@ -718,6 +733,7 @@ func (a App) renderSwitcherOverlay(base string) string {
 	lines = append(lines, title)
 	lines = append(lines, "")
 
+	numStyle := lipgloss.NewStyle().Foreground(common.Muted)
 	for i, acct := range a.cfg.Accounts {
 		indicator := "  "
 		if acct.Email == a.active.email {
@@ -727,18 +743,19 @@ func (a App) renderSwitcherOverlay(base string) string {
 		if name == "" {
 			name = acct.Email
 		}
-		line := indicator + name
-		email := "  " + acct.Email
+		prefix := fmt.Sprintf("[%d] ", i+1)
+		line := indicator + prefix + name
+		email := "     " + acct.Email
 
 		if i == a.switcherCursor && a.editingAccount {
-			lines = append(lines, indicator+a.nameInput.View())
+			lines = append(lines, indicator+prefix+a.nameInput.View())
 			lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render(email))
 		} else if i == a.switcherCursor {
 			nameStyle := lipgloss.NewStyle().Bold(true).Foreground(common.White).Background(common.Primary)
 			lines = append(lines, nameStyle.Render(padRight(line, innerWidth)))
 			lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render(email))
 		} else {
-			lines = append(lines, line)
+			lines = append(lines, indicator+numStyle.Render(prefix)+name)
 			lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render(email))
 		}
 	}
