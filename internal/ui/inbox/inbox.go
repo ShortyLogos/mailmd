@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -80,6 +81,9 @@ type Model struct {
 	// Jump-to
 	jumping   bool   // true when typing a line number
 	jumpInput string // accumulated digits
+
+	// Spinner
+	spinner spinner.Model
 }
 
 // New creates a new inbox model.
@@ -94,6 +98,7 @@ func New(ctx context.Context, client gmail.Client) Model {
 		cache:       make(map[int]*folderCache),
 		searchInput: ti,
 		syncing:     true, // first load
+		spinner:     spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
 	}
 }
 
@@ -143,7 +148,7 @@ func (m *Model) selectedOrCursor(fc *folderCache) (ids []string, subjects []stri
 
 // Init loads messages for the default folder and starts polling.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchMessages(), m.pollTick())
+	return tea.Batch(m.fetchMessages(), m.pollTick(), m.spinner.Tick)
 }
 
 func (m Model) pollTick() tea.Cmd {
@@ -344,6 +349,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case common.StatusMsg:
 		m.status = msg.Text
+
+	case spinner.TickMsg:
+		if m.syncing {
+			var cmd tea.Cmd
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
 
 	case tea.MouseMsg:
 		if m.searching {
@@ -667,27 +679,27 @@ func (m Model) View() string {
 	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
 	b.WriteString(tabRow + "\n")
 
-	// 2. Sync status line — left: sync info + count, right: status aligned to date column
-	leftParts := ""
+	// 2. Sync status line — left: count (fixed width) + sync status, right: action status
+	// Message count with reserved space (up to 5 digits = "99999 messages" = 15 chars)
+	countStr := fmt.Sprintf(" %-15s", fmt.Sprintf("%d messages", len(fc.messages)))
+	leftParts := common.MutedStyle.Render(countStr)
+
 	if m.syncing {
-		leftParts = common.SyncingStyle.Render(" Syncing...")
+		leftParts += " " + m.spinner.View() + " " + common.SyncingStyle.Render("Syncing...")
 	} else if m.err != "" {
-		leftParts = common.ErrorStyle.Render(" Error: " + m.err)
+		leftParts += " " + common.ErrorStyle.Render("Error: "+m.err)
 	} else if !fc.lastSync.IsZero() {
 		ago := time.Since(fc.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
-			leftParts = common.SyncedStyle.Render(" Synced")
+			leftParts += " " + common.SyncedStyle.Render("Synced")
 		} else if ago < time.Minute {
-			leftParts = common.SyncedStyle.Render(fmt.Sprintf(" Synced %ds ago", int(ago.Seconds())))
+			leftParts += " " + common.SyncedStyle.Render(fmt.Sprintf("Synced %ds ago", int(ago.Seconds())))
 		} else {
-			leftParts = common.MutedStyle.Render(fmt.Sprintf(" Synced %dm ago", int(ago.Minutes())))
+			leftParts += " " + common.MutedStyle.Render(fmt.Sprintf("Synced %dm ago", int(ago.Minutes())))
 		}
 	}
-	if len(fc.messages) > 0 {
-		leftParts += common.MutedStyle.Render(fmt.Sprintf("  %d messages", len(fc.messages)))
-	}
 	if m.searchQuery != "" {
-		leftParts += common.SyncingStyle.Render(fmt.Sprintf("  Search: \"%s\"", m.searchQuery))
+		leftParts += "  " + common.SyncingStyle.Render(fmt.Sprintf("Search: \"%s\"", m.searchQuery))
 	}
 
 	rightParts := ""
@@ -738,7 +750,7 @@ func (m Model) View() string {
 	// 5. Message list
 	if len(fc.messages) == 0 {
 		if m.syncing {
-			b.WriteString("\n  Loading messages...\n")
+			b.WriteString("\n  " + m.spinner.View() + " Loading messages...\n")
 		} else if m.searchQuery != "" {
 			b.WriteString("\n  No results.\n")
 		} else {
@@ -784,7 +796,7 @@ func (m Model) View() string {
 
 		check := "  " // always 2 chars
 		if fc.selected[msg.ID] {
-			check = "— "
+			check = "→ "
 		}
 
 		content := formatMessageLine(msg, listWidth-2-numColW-checkW)
