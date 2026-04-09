@@ -95,7 +95,7 @@ func (m Model) Init() tea.Cmd {
 		body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
 			links = append(links, rawURL)
 			label := compactURL(rawURL, 50)
-			return fmt.Sprintf("[%d: %s]", len(links), label)
+			return fmt.Sprintf("%d — %s", len(links), label)
 		})
 
 		// Strip mailto: prefix, leave plain email address (colorized later)
@@ -134,7 +134,7 @@ func renderPlainEmail(body string) string {
 	return result.String()
 }
 
-var linkRefRegex = regexp.MustCompile(`\[\d+: [^\]]+\]`)
+var linkRefRegex = regexp.MustCompile(`\d+ — [^\s]+`)
 
 // stripHTML converts HTML to readable plain text by removing tags,
 // converting block elements to newlines, and decoding entities.
