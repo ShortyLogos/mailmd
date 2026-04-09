@@ -71,9 +71,12 @@ func (m Model) renderBody() string {
 		body = "(No message body)"
 	}
 
+	// Wrap text at 80 chars but preserve URLs on single lines
+	body = wrapText(body, 80)
+
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0), // disable wrapping — preserves URLs intact
+		glamour.WithWordWrap(0), // we handle wrapping ourselves
 	)
 	if err != nil {
 		return markdown.ConvertPlain(body)
@@ -288,6 +291,44 @@ func (m Model) View() string {
 	b.WriteString(common.StatusBar.Width(m.width).Render(status))
 
 	return b.String()
+}
+
+// wrapText wraps lines at maxWidth on word boundaries, but leaves URLs intact.
+func wrapText(text string, maxWidth int) string {
+	var result strings.Builder
+	for _, line := range strings.Split(text, "\n") {
+		// Don't wrap lines that are URLs or start with whitespace (code/quotes)
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") ||
+			strings.HasPrefix(trimmed, "mailto:") || strings.HasPrefix(line, " ") ||
+			strings.HasPrefix(line, "\t") || strings.HasPrefix(line, ">") {
+			result.WriteString(line + "\n")
+			continue
+		}
+		if len(line) <= maxWidth {
+			result.WriteString(line + "\n")
+			continue
+		}
+		// Word-wrap this line
+		words := strings.Fields(line)
+		col := 0
+		for i, word := range words {
+			wordLen := len(word)
+			// Never break a URL even if it exceeds maxWidth
+			isURL := strings.HasPrefix(word, "http://") || strings.HasPrefix(word, "https://")
+			if col+wordLen > maxWidth && col > 0 && !isURL {
+				result.WriteString("\n")
+				col = 0
+			} else if i > 0 && col > 0 {
+				result.WriteString(" ")
+				col++
+			}
+			result.WriteString(word)
+			col += wordLen
+		}
+		result.WriteString("\n")
+	}
+	return result.String()
 }
 
 func formatSize(bytes int64) string {
