@@ -49,7 +49,10 @@ type moreMessagesMsg struct {
 }
 
 // trashDoneMsg signals a trash operation completed.
-type trashDoneMsg struct{ err error }
+type trashDoneMsg struct {
+	err   error
+	count int
+}
 
 // deleteDoneMsg signals a permanent delete completed.
 type deleteDoneMsg struct{ err error }
@@ -58,7 +61,10 @@ type deleteDoneMsg struct{ err error }
 type restoreDoneMsg struct{ err error }
 
 // toggleReadDoneMsg signals a mark read/unread toggle completed.
-type toggleReadDoneMsg struct{ err error }
+type toggleReadDoneMsg struct {
+	err   error
+	count int
+}
 
 // blockDoneMsg signals a block sender operation completed.
 type blockDoneMsg struct{ err error }
@@ -109,7 +115,8 @@ type Model struct {
 	jumpInput string // accumulated digits
 
 	// Spinner
-	spinner spinner.Model
+	spinner  spinner.Model
+	dotFrame int // cycles 0-2 for animated ellipsis
 }
 
 // New creates a new inbox model.
@@ -126,6 +133,12 @@ func New(ctx context.Context, client gmail.Client) Model {
 		syncing:     true, // first load
 		spinner:     spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
 	}
+}
+
+// IsInputActive reports whether the inbox is capturing keyboard input
+// (search field or jump-to mode), so parent key handlers should not intercept.
+func (m Model) IsInputActive() bool {
+	return m.searching || m.jumping
 }
 
 // fc returns the active message cache — search results if searching, otherwise folder cache.
@@ -267,21 +280,24 @@ func (m Model) restoreMessages(ids []string) tea.Cmd {
 }
 
 func (m Model) trashMessages(ids []string) tea.Cmd {
+	count := len(ids)
 	return func() tea.Msg {
 		err := m.client.TrashMessages(m.ctx, ids)
-		return trashDoneMsg{err: err}
+		return trashDoneMsg{err: err, count: count}
 	}
 }
 
-func (m Model) toggleRead(id string, markUnread bool) tea.Cmd {
+func (m Model) toggleReadMessages(ids []string, markUnread bool) tea.Cmd {
+	count := len(ids)
 	return func() tea.Msg {
-		var err error
+		var add, remove []string
 		if markUnread {
-			err = m.client.MoveMessage(m.ctx, id, []string{"UNREAD"}, nil)
+			add = []string{"UNREAD"}
 		} else {
-			err = m.client.MoveMessage(m.ctx, id, nil, []string{"UNREAD"})
+			remove = []string{"UNREAD"}
 		}
-		return toggleReadDoneMsg{err: err}
+		err := m.client.ModifyMessages(m.ctx, ids, add, remove)
+		return toggleReadDoneMsg{err: err, count: count}
 	}
 }
 
@@ -471,6 +487,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case trashDoneMsg:
 		if msg.err != nil {
 			m.status = "Error: " + msg.err.Error()
+		} else if msg.count > 1 {
+			m.status = fmt.Sprintf("%d messages trashed.", msg.count)
 		} else {
 			m.status = "Message trashed."
 		}
@@ -518,11 +536,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.status = msg.Text
 
 	case spinner.TickMsg:
-		if m.syncing || m.statusLoading {
-			var cmd tea.Cmd
-			m.spinner, cmd = m.spinner.Update(msg)
-			return m, cmd
-		}
+		// Always keep the spinner ticking so it animates immediately
+		// when syncing or statusLoading becomes true.
+		// Advance ellipsis every 2nd tick (~500ms per dot).
+		m.dotFrame = (m.dotFrame + 1) % 6
+		var cmd tea.Cmd
+		m.spinner, cmd = m.spinner.Update(msg)
+		return m, cmd
 
 	case tea.MouseMsg:
 		if m.searching {
@@ -792,17 +812,45 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("m"))):
-			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
-				cur := fc.messages[fc.cursor]
-				if cur.Unread {
-					fc.messages[fc.cursor].Unread = false
-					m.status = "Marked as read"
-					return m, m.toggleRead(cur.ID, false)
-				} else {
-					fc.messages[fc.cursor].Unread = true
-					m.status = "Marked as unread"
-					return m, m.toggleRead(cur.ID, true)
+			if len(fc.messages) > 0 {
+				// Collect target messages: selected if any, else cursor
+				type target struct {
+					idx int
+					id  string
 				}
+				var targets []target
+				for i, msg := range fc.messages {
+					if fc.selected[msg.ID] {
+						targets = append(targets, target{i, msg.ID})
+					}
+				}
+				if len(targets) == 0 && fc.cursor < len(fc.messages) {
+					targets = []target{{fc.cursor, fc.messages[fc.cursor].ID}}
+				}
+				if len(targets) == 0 {
+					return m, nil
+				}
+				// Determine direction from the first target
+				markUnread := !fc.messages[targets[0].idx].Unread
+				var ids []string
+				for _, t := range targets {
+					fc.messages[t.idx].Unread = markUnread
+					ids = append(ids, t.id)
+				}
+				if markUnread {
+					if len(ids) == 1 {
+						m.status = "Marked as unread"
+					} else {
+						m.status = fmt.Sprintf("%d messages marked as unread", len(ids))
+					}
+				} else {
+					if len(ids) == 1 {
+						m.status = "Marked as read"
+					} else {
+						m.status = fmt.Sprintf("%d messages marked as read", len(ids))
+					}
+				}
+				return m, m.toggleReadMessages(ids, markUnread)
 			}
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("b"))):
@@ -834,7 +882,7 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 
 	noSel := len(fc.selected) == 0
 
-	// Show m=mark read/unread based on current message state
+	// Show m=mark read/unread based on current/selected message state
 	markHint := ""
 	if noSel && fc.cursor < len(fc.messages) {
 		if fc.messages[fc.cursor].Unread {
@@ -842,6 +890,8 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 		} else {
 			markHint = "  m=unread"
 		}
+	} else if !noSel {
+		markHint = "  m=read/unread"
 	}
 
 	switch label {
@@ -1010,7 +1060,9 @@ func (m Model) View() string {
 	// 5. Message list
 	if len(fc.messages) == 0 {
 		if m.syncing {
-			b.WriteString("\n  " + m.spinner.View() + " Loading messages...\n")
+			phase := m.dotFrame / 2 // 0, 1, 2 — each held for 2 spinner ticks
+			dots := strings.Repeat(".", phase+1) + strings.Repeat(" ", 2-phase)
+			b.WriteString("\n  Loading messages" + dots + "\n")
 		} else if m.searchQuery != "" {
 			b.WriteString("\n  No results.\n")
 		} else {

@@ -25,6 +25,7 @@ type Client interface {
 	DeleteMessage(ctx context.Context, id string) error
 	DeleteMessages(ctx context.Context, ids []string) error
 	MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error
+	ModifyMessages(ctx context.Context, ids []string, addLabels, removeLabels []string) error
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
 	CheckAttachments(ctx context.Context, ids []string) (map[string]bool, error)
 	GetProfile(ctx context.Context) (string, error)
@@ -223,6 +224,18 @@ func (c *gmailClient) MoveMessage(ctx context.Context, id string, addLabels, rem
 	req := &gapi.ModifyMessageRequest{AddLabelIds: addLabels, RemoveLabelIds: removeLabels}
 	_, err := c.svc.Users.Messages.Modify(c.user, id, req).Context(ctx).Do()
 	return err
+}
+
+func (c *gmailClient) ModifyMessages(ctx context.Context, ids []string, addLabels, removeLabels []string) error {
+	if len(ids) == 1 {
+		return c.MoveMessage(ctx, ids[0], addLabels, removeLabels)
+	}
+	req := &gapi.BatchModifyMessagesRequest{
+		Ids:            ids,
+		AddLabelIds:    addLabels,
+		RemoveLabelIds: removeLabels,
+	}
+	return c.svc.Users.Messages.BatchModify(c.user, req).Context(ctx).Do()
 }
 
 func (c *gmailClient) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
