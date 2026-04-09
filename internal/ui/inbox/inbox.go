@@ -33,10 +33,19 @@ var folders = []folder{
 
 // messagesLoadedMsg carries the result of fetching messages.
 type messagesLoadedMsg struct {
-	messages []gmail.MessageSummary
-	err      error
-	tabIdx   int    // which folder this response belongs to
-	query    string // search query this response belongs to
+	messages      []gmail.MessageSummary
+	nextPageToken string
+	err           error
+	tabIdx        int    // which folder this response belongs to
+	query         string // search query this response belongs to
+}
+
+// moreMessagesMsg carries the result of loading the next page.
+type moreMessagesMsg struct {
+	messages      []gmail.MessageSummary
+	nextPageToken string
+	err           error
+	tabIdx        int
 }
 
 // trashDoneMsg signals a trash operation completed.
@@ -53,10 +62,12 @@ type pollTickMsg struct{}
 
 // folderCache stores per-folder state.
 type folderCache struct {
-	messages []gmail.MessageSummary
-	cursor   int
-	lastSync time.Time
-	selected map[string]bool // message ID → selected
+	messages      []gmail.MessageSummary
+	cursor        int
+	lastSync      time.Time
+	selected      map[string]bool // message ID → selected
+	nextPageToken string          // for loading more messages
+	loadingMore   bool            // true while fetching next page
 }
 
 // Model is the inbox Bubble Tea model.
@@ -170,7 +181,7 @@ func (m Model) fetchMessages() tea.Cmd {
 		if err != nil {
 			return messagesLoadedMsg{err: err, tabIdx: tabIdx}
 		}
-		return messagesLoadedMsg{messages: list.Messages, tabIdx: tabIdx}
+		return messagesLoadedMsg{messages: list.Messages, nextPageToken: list.NextPageToken, tabIdx: tabIdx}
 	}
 }
 
@@ -184,6 +195,35 @@ func (m Model) fetchSearch(query string) tea.Cmd {
 	}
 }
 
+
+// maybePrefetch returns a command to load more messages if cursor is near the end.
+func (m Model) maybePrefetch(fc *folderCache) tea.Cmd {
+	if fc.loadingMore || fc.nextPageToken == "" {
+		return nil
+	}
+	// Trigger when within 10 messages of the end
+	if fc.cursor >= len(fc.messages)-10 {
+		fc.loadingMore = true
+		return m.fetchMoreMessages(fc.nextPageToken)
+	}
+	return nil
+}
+
+func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
+	tabIdx := m.tabIdx
+	labelID := folders[tabIdx].labelID
+	query := ""
+	if labelID == "INBOX" {
+		query = "category:primary"
+	}
+	return func() tea.Msg {
+		list, err := m.client.ListMessages(m.ctx, labelID, query, pageToken)
+		if err != nil {
+			return moreMessagesMsg{err: err, tabIdx: tabIdx}
+		}
+		return moreMessagesMsg{messages: list.Messages, nextPageToken: list.NextPageToken, tabIdx: tabIdx}
+	}
+}
 
 func (m Model) deleteMessages(ids []string) tea.Cmd {
 	return func() tea.Msg {
@@ -326,6 +366,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				prevID = target.messages[target.cursor].ID
 			}
 			target.messages = msg.messages
+			target.nextPageToken = msg.nextPageToken
+			target.loadingMore = false
 			if prevID != "" {
 				for i, m := range target.messages {
 					if m.ID == prevID {
@@ -342,6 +384,18 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.err = ""
 			}
 		}
+
+	case moreMessagesMsg:
+		if m.cache[msg.tabIdx] == nil {
+			return m, nil
+		}
+		target := m.cache[msg.tabIdx]
+		target.loadingMore = false
+		if msg.err != nil {
+			return m, nil // silently ignore — messages already visible
+		}
+		target.messages = append(target.messages, msg.messages...)
+		target.nextPageToken = msg.nextPageToken
 
 	case trashDoneMsg:
 		if msg.err != nil {
@@ -400,6 +454,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case tea.MouseButtonWheelDown:
 			if fc.cursor < len(fc.messages)-1 {
 				fc.cursor++
+			}
+			if cmd := m.maybePrefetch(fc); cmd != nil {
+				return m, cmd
 			}
 		case tea.MouseButtonLeft:
 			if msg.Action == tea.MouseActionRelease {
@@ -462,7 +519,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					}
 					fc.cursor = n - 1 // 1-indexed → 0-indexed
 				}
-				return m, nil
+				return m, m.maybePrefetch(fc)
 
 			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 				m.jumping = false
@@ -510,6 +567,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		case key.Matches(msg, common.Keys.Down):
 			if fc.cursor < len(fc.messages)-1 {
 				fc.cursor++
+			}
+			if cmd := m.maybePrefetch(fc); cmd != nil {
+				return m, cmd
 			}
 
 		case key.Matches(msg, common.Keys.NextTab):
