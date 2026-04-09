@@ -1,7 +1,12 @@
 package reader
 
 import (
+	"context"
 	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -13,8 +18,13 @@ import (
 	"github.com/deric/mailmd/internal/ui/common"
 )
 
+// attachmentOpenedMsg signals an attachment was saved and opened.
+type attachmentOpenedMsg struct{ err error }
+
 // Model is the reader Bubble Tea model.
 type Model struct {
+	ctx      context.Context
+	client   gmail.Client
 	message  *gmail.Message
 	viewport viewport.Model
 	width    int
@@ -23,8 +33,10 @@ type Model struct {
 }
 
 // New creates a new reader model for the given message.
-func New(msg *gmail.Message, width, height int) Model {
+func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height int) Model {
 	m := Model{
+		ctx:     ctx,
+		client:  client,
 		message: msg,
 		width:   width,
 		height:  height,
@@ -35,6 +47,9 @@ func New(msg *gmail.Message, width, height int) Model {
 
 func (m *Model) initViewport() {
 	headerHeight := 5 // From, To, Subject, Date, separator
+	if len(m.message.Attachments) > 0 {
+		headerHeight += 1 + len(m.message.Attachments) // blank line + one per attachment
+	}
 	statusHeight := 1
 	vpHeight := m.height - headerHeight - statusHeight - 1
 	if vpHeight < 1 {
@@ -58,7 +73,7 @@ func (m Model) renderBody() string {
 
 	r, err := glamour.NewTermRenderer(
 		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(m.width-4), // match terminal width with some padding
+		glamour.WithWordWrap(m.width-4),
 	)
 	if err != nil {
 		return markdown.ConvertPlain(body)
@@ -75,6 +90,39 @@ func (m Model) Init() tea.Cmd {
 	return nil
 }
 
+func (m Model) openAttachment(idx int) tea.Cmd {
+	if idx < 0 || idx >= len(m.message.Attachments) {
+		return nil
+	}
+	att := m.message.Attachments[idx]
+	msgID := m.message.ID
+	ctx := m.ctx
+	client := m.client
+	return func() tea.Msg {
+		data, err := client.GetAttachment(ctx, msgID, att.ID)
+		if err != nil {
+			return attachmentOpenedMsg{err: err}
+		}
+		// Save to temp file and open with default app
+		tmpDir := os.TempDir()
+		path := filepath.Join(tmpDir, "mailmd-"+att.Filename)
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			return attachmentOpenedMsg{err: err}
+		}
+		var cmd *exec.Cmd
+		switch runtime.GOOS {
+		case "darwin":
+			cmd = exec.Command("open", path)
+		case "linux":
+			cmd = exec.Command("xdg-open", path)
+		}
+		if cmd != nil {
+			cmd.Start()
+		}
+		return attachmentOpenedMsg{}
+	}
+}
+
 // Update handles key events for the reader.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -82,6 +130,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 		m.initViewport()
+
+	case attachmentOpenedMsg:
+		// Could show status, for now just ignore errors silently
+		return m, nil
 
 	case tea.MouseMsg:
 		var cmd tea.Cmd
@@ -109,6 +161,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, tea.Quit
 
 		default:
+			// Number keys open attachments (1-9)
+			if len(m.message.Attachments) > 0 && len(msg.String()) == 1 {
+				c := msg.String()[0]
+				if c >= '1' && c <= '9' {
+					idx := int(c - '1')
+					if idx < len(m.message.Attachments) {
+						return m, m.openAttachment(idx)
+					}
+				}
+			}
+
 			var cmd tea.Cmd
 			m.viewport, cmd = m.viewport.Update(msg)
 			return m, cmd
@@ -134,15 +197,38 @@ func (m Model) View() string {
 		dateStr = m.message.Date.Format("Mon, 02 Jan 2006 15:04:05 MST")
 	}
 	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("Date:    %s", dateStr)) + "\n")
+
+	// Attachments
+	if len(m.message.Attachments) > 0 {
+		attStyle := common.SyncingStyle
+		for i, att := range m.message.Attachments {
+			size := formatSize(att.Size)
+			b.WriteString(attStyle.Render(fmt.Sprintf("  [%d] %s (%s)", i+1, att.Filename, size)) + "\n")
+		}
+	}
+
 	b.WriteString(strings.Repeat("─", m.width) + "\n")
 
 	// Scrollable body
 	b.WriteString(m.viewport.View() + "\n")
 
 	// Status bar
-	status := fmt.Sprintf(" esc=back  r=reply  f=forward  j/k=scroll  q=quit  [%d%%]",
-		int(m.viewport.ScrollPercent()*100))
+	status := " esc=back  r=reply  f=forward  j/k=scroll  q=quit"
+	if len(m.message.Attachments) > 0 {
+		status += "  1-9=open attachment"
+	}
+	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
 	b.WriteString(common.StatusBar.Width(m.width).Render(status))
 
 	return b.String()
+}
+
+func formatSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
 }

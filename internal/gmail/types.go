@@ -21,14 +21,22 @@ type MessageList struct {
 	NextPageToken string
 }
 
+type Attachment struct {
+	ID       string // Gmail attachment ID (for fetching)
+	Filename string
+	MimeType string
+	Size     int64
+}
+
 type Message struct {
-	ID       string
-	ThreadID string
-	From     string
-	To       string
-	Subject  string
-	Date     time.Time
-	Body     string
-	HTMLBody string
-	Unread   bool
+	ID          string
+	ThreadID    string
+	From        string
+	To          string
+	Subject     string
+	Date        time.Time
+	Body        string
+	HTMLBody    string
+	Unread      bool
+	Attachments []Attachment
 }

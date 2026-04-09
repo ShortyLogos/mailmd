@@ -768,11 +768,8 @@ func (m Model) View() string {
 		end = len(fc.messages)
 	}
 
-	hasSelection := len(fc.selected) > 0
-	checkW := 0
-	if hasSelection {
-		checkW = 2
-	}
+	// Selection column is always present (2 chars) — no layout shift
+	checkW := 2
 	// Line number column width (e.g., 2 digits for ≤99 messages, 3 for ≤999)
 	numW := len(strconv.Itoa(len(fc.messages)))
 	if numW < 2 {
@@ -785,13 +782,9 @@ func (m Model) View() string {
 		// Build raw text line (no ANSI codes) — styled as a whole at the end
 		lineNum := fmt.Sprintf("%*d ", numW, i+1)
 
-		check := ""
-		if hasSelection {
-			if fc.selected[msg.ID] {
-				check = "> "
-			} else {
-				check = "  "
-			}
+		check := "  " // always 2 chars
+		if fc.selected[msg.ID] {
+			check = "> "
 		}
 
 		content := formatMessageLine(msg, listWidth-2-numColW-checkW)

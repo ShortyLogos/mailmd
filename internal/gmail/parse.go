@@ -34,16 +34,37 @@ func parseMessage(msg *gapi.Message) *Message {
 	headers := msg.Payload.Headers
 	date := parseDate(getHeader(headers, "Date"), msg.InternalDate)
 	plain, html := extractBodies(msg.Payload)
+	attachments := extractAttachments(msg.Payload)
 	return &Message{
-		ID:       msg.Id,
-		ThreadID: msg.ThreadId,
-		From:     getHeader(headers, "From"),
-		To:       getHeader(headers, "To"),
-		Subject:  getHeader(headers, "Subject"),
-		Date:     date,
-		Body:     plain,
-		HTMLBody: html,
+		ID:          msg.Id,
+		ThreadID:    msg.ThreadId,
+		From:        getHeader(headers, "From"),
+		To:          getHeader(headers, "To"),
+		Subject:     getHeader(headers, "Subject"),
+		Date:        date,
+		Body:        plain,
+		HTMLBody:    html,
+		Attachments: attachments,
 	}
+}
+
+func extractAttachments(part *gapi.MessagePart) []Attachment {
+	var attachments []Attachment
+	if part == nil {
+		return attachments
+	}
+	if part.Filename != "" && part.Body != nil && part.Body.AttachmentId != "" {
+		attachments = append(attachments, Attachment{
+			ID:       part.Body.AttachmentId,
+			Filename: part.Filename,
+			MimeType: part.MimeType,
+			Size:     part.Body.Size,
+		})
+	}
+	for _, p := range part.Parts {
+		attachments = append(attachments, extractAttachments(p)...)
+	}
+	return attachments
 }
 
 func extractBodies(part *gapi.MessagePart) (plain, html string) {

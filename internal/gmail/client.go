@@ -23,6 +23,7 @@ type Client interface {
 	UntrashMessage(ctx context.Context, id string) error
 	DeleteMessage(ctx context.Context, id string) error
 	MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error
+	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
 }
 
 type gmailClient struct {
@@ -197,4 +198,12 @@ func (c *gmailClient) MoveMessage(ctx context.Context, id string, addLabels, rem
 	req := &gapi.ModifyMessageRequest{AddLabelIds: addLabels, RemoveLabelIds: removeLabels}
 	_, err := c.svc.Users.Messages.Modify(c.user, id, req).Context(ctx).Do()
 	return err
+}
+
+func (c *gmailClient) GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error) {
+	resp, err := c.svc.Users.Messages.Attachments.Get(c.user, messageID, attachmentID).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	return base64.URLEncoding.DecodeString(resp.Data)
 }

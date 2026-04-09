@@ -120,12 +120,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = fmt.Sprintf("Error fetching message: %v", msg.err)
 			return a, nil
 		}
-		a.reader = reader.New(msg.msg, a.width, a.height)
+		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height)
 		a.active = screenReader
 		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
 
 	case common.OpenMessageMsg:
-		a.reader = reader.New(msg.Message, a.width, a.height)
+		a.reader = reader.New(a.ctx, a.client, msg.Message, a.width, a.height)
 		a.active = screenReader
 		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
 
