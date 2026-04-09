@@ -56,9 +56,15 @@ func (m Model) renderBody() string {
 		body = "(No message body)"
 	}
 
-	rendered, err := glamour.Render(body, "dark")
+	r, err := glamour.NewTermRenderer(
+		glamour.WithAutoStyle(),
+		glamour.WithWordWrap(m.width-4), // match terminal width with some padding
+	)
 	if err != nil {
-		// Fall back to plain text with basic markdown convert
+		return markdown.ConvertPlain(body)
+	}
+	rendered, err := r.Render(body)
+	if err != nil {
 		return markdown.ConvertPlain(body)
 	}
 	return rendered
