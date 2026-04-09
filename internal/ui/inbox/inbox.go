@@ -679,49 +679,68 @@ func (m Model) View() string {
 	tabRow := common.TabBar.Width(m.width).Render(strings.Join(tabs, ""))
 	b.WriteString(tabRow + "\n")
 
-	// 2. Sync status line — left: count (fixed width) + sync status, right: action status
-	// Message count with reserved space (up to 5 digits = "99999 messages" = 15 chars)
-	countStr := fmt.Sprintf(" %-15s", fmt.Sprintf("%d messages", len(fc.messages)))
-	leftParts := common.MutedStyle.Render(countStr)
+	// 2. Sync status line
+	// Left zone: fixed width to align action text with subject column
+	// Layout mirrors message row: pad(1) + numCol + check(2) + unread(2) + from
+	listWidth := m.width
+	if m.showPreview {
+		listWidth = m.width * 6 / 10
+	}
+	numW := len(strconv.Itoa(len(fc.messages)))
+	if numW < 2 {
+		numW = 2
+	}
+	fromW := (listWidth - 2) / 4
+	if fromW > 24 {
+		fromW = 24
+	}
+	if fromW < 12 {
+		fromW = 12
+	}
+	// Fixed left zone = 1(pad) + numW+1(numCol) + 2(check) + 2(unread+space) + fromW + 2(gap)
+	leftZoneW := 1 + numW + 1 + 2 + 2 + fromW + 2
 
+	// Build left content: count + sync
+	syncText := ""
 	if m.syncing {
-		leftParts += " " + m.spinner.View() + " " + common.SyncingStyle.Render("Syncing...")
+		syncText = m.spinner.View() + " " + common.SyncingStyle.Render("Syncing...")
 	} else if m.err != "" {
-		leftParts += " " + common.ErrorStyle.Render("Error: "+m.err)
+		syncText = common.ErrorStyle.Render("Error: " + m.err)
 	} else if !fc.lastSync.IsZero() {
 		ago := time.Since(fc.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
-			leftParts += " " + common.SyncedStyle.Render("Synced")
+			syncText = common.SyncedStyle.Render("Synced")
 		} else if ago < time.Minute {
-			leftParts += " " + common.SyncedStyle.Render(fmt.Sprintf("Synced %ds ago", int(ago.Seconds())))
+			syncText = common.SyncedStyle.Render(fmt.Sprintf("Synced %ds ago", int(ago.Seconds())))
 		} else {
-			leftParts += " " + common.MutedStyle.Render(fmt.Sprintf("Synced %dm ago", int(ago.Minutes())))
+			syncText = common.MutedStyle.Render(fmt.Sprintf("Synced %dm ago", int(ago.Minutes())))
 		}
 	}
-	if m.searchQuery != "" {
-		leftParts += "  " + common.SyncingStyle.Render(fmt.Sprintf("Search: \"%s\"", m.searchQuery))
+	countText := common.MutedStyle.Render(fmt.Sprintf("%d messages", len(fc.messages)))
+	leftContent := " " + countText + "  " + syncText
+
+	// Pad/truncate left zone to fixed width
+	leftRendered := leftContent
+	leftActualW := rw.StringWidth(lipgloss.NewStyle().Render(leftRendered))
+	if leftActualW < leftZoneW {
+		leftRendered += strings.Repeat(" ", leftZoneW-leftActualW)
 	}
 
+	// Right zone: action text (starts at subject column)
 	rightParts := ""
 	if m.jumping {
 		rightParts = common.SyncingStyle.Render(fmt.Sprintf("Go to: %s_", m.jumpInput))
 	} else if m.status != "" {
 		rightParts = common.MutedStyle.Render(m.status)
 	}
+	if m.searchQuery != "" {
+		if rightParts != "" {
+			rightParts += "  "
+		}
+		rightParts += common.SyncingStyle.Render(fmt.Sprintf("Search: \"%s\"", m.searchQuery))
+	}
 
-	// Right-align status to the date column position (last ~8 chars of list width)
-	listWidth := m.width
-	if m.showPreview {
-		listWidth = m.width * 6 / 10
-	}
-	rightPos := listWidth - 2 // align with date column end
-	leftW := rw.StringWidth(lipgloss.NewStyle().Render(leftParts))
-	rightW := rw.StringWidth(lipgloss.NewStyle().Render(rightParts))
-	gap := rightPos - leftW - rightW
-	if gap < 1 {
-		gap = 1
-	}
-	b.WriteString(leftParts + strings.Repeat(" ", gap) + rightParts + "\n")
+	b.WriteString(leftRendered + rightParts + "\n")
 
 	// Padding below status line
 	b.WriteString("\n")
@@ -782,11 +801,6 @@ func (m Model) View() string {
 
 	// Selection column is always present (2 chars) — no layout shift
 	checkW := 2
-	// Line number column width (e.g., 2 digits for ≤99 messages, 3 for ≤999)
-	numW := len(strconv.Itoa(len(fc.messages)))
-	if numW < 2 {
-		numW = 2
-	}
 	numColW := numW + 1 // number + space
 
 	for i := start; i < end; i++ {
