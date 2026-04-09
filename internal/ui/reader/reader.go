@@ -95,7 +95,7 @@ func (m Model) Init() tea.Cmd {
 		body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
 			links = append(links, rawURL)
 			label := compactURL(rawURL, 50)
-			return fmt.Sprintf("%d — %s", len(links), label)
+			return fmt.Sprintf("[%d] %s", len(links), label)
 		})
 
 		// Strip mailto: prefix, leave plain email address (colorized later)
@@ -116,7 +116,7 @@ func (m Model) Init() tea.Cmd {
 // renderPlainEmail applies minimal ANSI styling to plain text email body.
 // Colors link references [N: ...] and email addresses.
 func renderPlainEmail(body string) string {
-	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Italic(true) // sky blue
+	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Bold(true) // sky blue
 	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))              // green
 
 	var result strings.Builder
@@ -134,7 +134,7 @@ func renderPlainEmail(body string) string {
 	return result.String()
 }
 
-var linkRefRegex = regexp.MustCompile(`\d+ — [^\s]+`)
+var linkRefRegex = regexp.MustCompile(`\[\d+\] [^\s]+`)
 
 // stripHTML converts HTML to readable plain text by removing tags,
 // converting block elements to newlines, and decoding entities.
