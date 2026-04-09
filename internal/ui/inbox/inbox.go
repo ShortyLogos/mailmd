@@ -896,9 +896,14 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 		subject = "(no subject)"
 	}
 	subject = runewidthTruncate(subject, subjectW)
-	subject = runewidthPadRight(subject, subjectW)
 
-	return fmt.Sprintf("%s %s  %s   %s", unread, from, subject, dateStr)
+	// Build left portion and hard-truncate to exact width to handle emoji width mismatches
+	left := fmt.Sprintf("%s %s  %s", unread, from, subject)
+	leftTarget := width - 3 - dateW // gap(3) + date
+	left = runewidthTruncate(left, leftTarget)
+	left = runewidthPadRight(left, leftTarget)
+
+	return left + "   " + dateStr
 }
 
 func buildPreview(msg gmail.MessageSummary, width, height int) []string {
