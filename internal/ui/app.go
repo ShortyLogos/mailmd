@@ -97,12 +97,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.reader = reader.New(msg.msg, a.width, a.height)
 		a.active = screenReader
-		return a, a.reader.Init()
+		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
 
 	case common.OpenMessageMsg:
 		a.reader = reader.New(msg.Message, a.width, a.height)
 		a.active = screenReader
-		return a, a.reader.Init()
+		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
 
 	case common.ComposeMsg:
 		a.composer = composer.New(a.ctx, a.client, a.cfg.Editor(), msg.Template, a.width, a.height)
@@ -112,7 +112,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.BackToInboxMsg:
 		a.active = screenInbox
 		a.status = ""
-		return a, nil
+		return a, tea.EnableMouseCellMotion
 
 	case common.SendResultMsg:
 		a.active = screenInbox
@@ -122,7 +122,8 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.status = "Message sent!"
 		}
 		return a, tea.Batch(
-			a.inbox.Init(), // refresh inbox
+			a.inbox.Init(),
+			tea.EnableMouseCellMotion,
 			func() tea.Msg { return common.StatusMsg{Text: a.status} },
 		)
 
