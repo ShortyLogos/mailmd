@@ -590,7 +590,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
-	subjectW := width - 2 - fromW - 2 - 1 - dateW
+	subjectW := width - 2 - fromW - 2 - 3 - dateW
 	if subjectW < 0 {
 		subjectW = 0
 	}
@@ -601,7 +601,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	subject = runewidthTruncate(subject, subjectW)
 	subject = runewidthPadRight(subject, subjectW)
 
-	return fmt.Sprintf("%s %s  %s %s", unread, from, subject, dateStr)
+	return fmt.Sprintf("%s %s  %s   %s", unread, from, subject, dateStr)
 }
 
 func buildPreview(msg gmail.MessageSummary, width, height int) []string {
