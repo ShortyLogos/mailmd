@@ -202,6 +202,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
 			}
 
+		case key.Matches(msg, common.Keys.Up):
+			m.viewport.LineUp(5)
+			return m, nil
+
+		case key.Matches(msg, common.Keys.Down):
+			m.viewport.LineDown(5)
+			return m, nil
+
 		case key.Matches(msg, common.Keys.Quit):
 			return m, tea.Quit
 
