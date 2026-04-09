@@ -1042,7 +1042,13 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
-	subjectW := width - 2 - fromW - 2 - 3 - dateW
+	// Fixed-width attachment indicator column (always 2 chars)
+	attach := "  "
+	if msg.HasAttachments {
+		attach = "📎"
+	}
+
+	subjectW := width - 2 - fromW - 2 - 2 - 1 - 3 - dateW // unread(2) + from + gap(2) + attach(2) + gap(1) + gap(3) + date
 	if subjectW < 0 {
 		subjectW = 0
 	}
@@ -1053,7 +1059,7 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	subject = runewidthTruncate(subject, subjectW)
 
 	// Build left portion and hard-truncate to exact width to handle emoji width mismatches
-	left := fmt.Sprintf("%s %s  %s", unread, from, subject)
+	left := fmt.Sprintf("%s %s  %s %s", unread, from, attach, subject)
 	leftTarget := width - 3 - dateW // gap(3) + date
 	left = runewidthTruncate(left, leftTarget)
 	left = runewidthPadRight(left, leftTarget)

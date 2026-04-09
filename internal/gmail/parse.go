@@ -21,12 +21,13 @@ func parseMessageSummary(msg *gapi.Message) MessageSummary {
 		}
 	}
 	return MessageSummary{
-		ID:      msg.Id,
-		From:    getHeader(headers, "From"),
-		Subject: getHeader(headers, "Subject"),
-		Snippet: html.UnescapeString(msg.Snippet),
-		Date:    date,
-		Unread:  unread,
+		ID:             msg.Id,
+		From:           getHeader(headers, "From"),
+		Subject:        getHeader(headers, "Subject"),
+		Snippet:        html.UnescapeString(msg.Snippet),
+		Date:           date,
+		Unread:         unread,
+		HasAttachments: hasAttachments(msg.Payload),
 	}
 }
 
@@ -46,6 +47,21 @@ func parseMessage(msg *gapi.Message) *Message {
 		HTMLBody:    html,
 		Attachments: attachments,
 	}
+}
+
+func hasAttachments(part *gapi.MessagePart) bool {
+	if part == nil {
+		return false
+	}
+	if part.Filename != "" && part.Body != nil && part.Body.AttachmentId != "" {
+		return true
+	}
+	for _, p := range part.Parts {
+		if hasAttachments(p) {
+			return true
+		}
+	}
+	return false
 }
 
 func extractAttachments(part *gapi.MessagePart) []Attachment {

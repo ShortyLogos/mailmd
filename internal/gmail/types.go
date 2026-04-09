@@ -8,12 +8,13 @@ type Label struct {
 }
 
 type MessageSummary struct {
-	ID      string
-	From    string
-	Subject string
-	Snippet string
-	Date    time.Time
-	Unread  bool
+	ID             string
+	From           string
+	Subject        string
+	Snippet        string
+	Date           time.Time
+	Unread         bool
+	HasAttachments bool
 }
 
 type MessageList struct {
