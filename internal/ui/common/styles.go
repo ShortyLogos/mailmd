@@ -30,7 +30,7 @@ var (
 
 	// Chrome
 	StatusBar    = lipgloss.NewStyle().Foreground(Muted).BorderStyle(lipgloss.NormalBorder()).BorderTop(true).BorderForeground(Secondary).Padding(0, 1)
-	ReaderHeader = lipgloss.NewStyle().Bold(true).Padding(0, 0, 1, 0)
+	ReaderHeader = lipgloss.NewStyle().Bold(true)
 	ErrorStyle   = lipgloss.NewStyle().Foreground(Danger).Bold(true)
 	Title        = lipgloss.NewStyle().Bold(true).Foreground(Primary)
 

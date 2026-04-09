@@ -258,6 +258,18 @@ func (m Model) TabIdx() int {
 	return m.tabIdx
 }
 
+// MarkRead optimistically marks a message as read in the local cache.
+func (m *Model) MarkRead(id string) {
+	for tabIdx, fc := range m.cache {
+		for i, msg := range fc.messages {
+			if msg.ID == id {
+				m.cache[tabIdx].messages[i].Unread = false
+				return
+			}
+		}
+	}
+}
+
 // Update handles key presses and messages.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {

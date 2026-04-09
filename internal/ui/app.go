@@ -95,6 +95,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case common.FetchMessageMsg:
 		id := msg.ID
+		a.inbox.MarkRead(id) // optimistic local update
 		// Check cache first
 		if cached, ok := a.msgCache[id]; ok {
 			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())
@@ -142,9 +143,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.msgCache[msg.msg.ID] = msg.msg
+		a.inbox.MarkRead(msg.msg.ID) // optimistic local update
 		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
-		// Mark as read in the background
 		return a, tea.Batch(a.reader.Init(), tea.DisableMouse, a.markAsRead(msg.msg.ID))
 
 	case common.OpenMessageMsg:

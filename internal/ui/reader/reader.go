@@ -52,13 +52,12 @@ func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, he
 }
 
 func (m *Model) initViewport() {
-	tabBarHeight := 2 // tab bar + border
-	headerHeight := 5 // From, To, Subject, Date, separator
+	// Tab bar(1) + border(1) + From(1) + To(1) + Subject(1) + Date(1) + separator(1) + status(2)
+	chrome := 9
 	if len(m.message.Attachments) > 0 {
-		headerHeight += len(m.message.Attachments) // one per attachment
+		chrome += len(m.message.Attachments)
 	}
-	statusHeight := 2 // status bar + border
-	vpHeight := m.height - tabBarHeight - headerHeight - statusHeight
+	vpHeight := m.height - chrome
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
