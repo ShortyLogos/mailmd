@@ -40,6 +40,12 @@ type messagesLoadedMsg struct {
 // trashDoneMsg signals a trash operation completed.
 type trashDoneMsg struct{ err error }
 
+// deleteDoneMsg signals a permanent delete completed.
+type deleteDoneMsg struct{ err error }
+
+// restoreDoneMsg signals a restore/untrash completed.
+type restoreDoneMsg struct{ err error }
+
 // pollTickMsg triggers a background refresh.
 type pollTickMsg struct{}
 
@@ -139,6 +145,25 @@ func (m Model) trashMessage(id string) tea.Cmd {
 	}
 }
 
+func (m Model) deleteMessage(id string) tea.Cmd {
+	return func() tea.Msg {
+		err := m.client.DeleteMessage(m.ctx, id)
+		return deleteDoneMsg{err: err}
+	}
+}
+
+func (m Model) restoreMessage(id string) tea.Cmd {
+	return func() tea.Msg {
+		err := m.client.UntrashMessage(m.ctx, id)
+		return restoreDoneMsg{err: err}
+	}
+}
+
+// currentLabelID returns the label ID of the active folder.
+func (m Model) currentLabelID() string {
+	return folders[m.tabIdx].labelID
+}
+
 // Update handles key presses and messages.
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -201,9 +226,27 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case trashDoneMsg:
 		if msg.err != nil {
-			m.status = "Error trashing message: " + msg.err.Error()
+			m.status = "Error: " + msg.err.Error()
 		} else {
 			m.status = "Message trashed."
+		}
+		m.syncing = true
+		return m, m.fetchMessages()
+
+	case deleteDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+		} else {
+			m.status = "Message permanently deleted."
+		}
+		m.syncing = true
+		return m, m.fetchMessages()
+
+	case restoreDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+		} else {
+			m.status = "Message restored to Inbox."
 		}
 		m.syncing = true
 		return m, m.fetchMessages()
@@ -349,17 +392,54 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.Trash):
 			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
-				trashed := fc.messages[fc.cursor]
-				m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(trashed.Subject, 40))
+				target := fc.messages[fc.cursor]
+				// Optimistically remove from list
 				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
 				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
 					fc.cursor--
 				}
-				return m, m.trashMessage(trashed.ID)
+
+				label := m.currentLabelID()
+				switch label {
+				case "TRASH", "DRAFT":
+					m.status = fmt.Sprintf("Deleting \"%s\"...", truncate(target.Subject, 40))
+					return m, m.deleteMessage(target.ID)
+				default:
+					m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(target.Subject, 40))
+					return m, m.trashMessage(target.ID)
+				}
+			}
+
+		case key.Matches(msg, common.Keys.Restore):
+			label := m.currentLabelID()
+			if label == "TRASH" && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				target := fc.messages[fc.cursor]
+				m.status = fmt.Sprintf("Restoring \"%s\"...", truncate(target.Subject, 40))
+				fc.messages = append(fc.messages[:fc.cursor], fc.messages[fc.cursor+1:]...)
+				if fc.cursor >= len(fc.messages) && fc.cursor > 0 {
+					fc.cursor--
+				}
+				return m, m.restoreMessage(target.ID)
 			}
 		}
 	}
 	return m, nil
+}
+
+func (m Model) keybindsForFolder() string {
+	base := " j/k=nav  o=open  c=compose"
+	label := m.currentLabelID()
+
+	switch label {
+	case "TRASH":
+		return base + "  d=delete  u=restore  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	case "DRAFT":
+		return base + "  d=delete  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	case "SENT":
+		return base + "  d=trash  f=forward  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	default: // INBOX
+		return base + "  d=trash  r=reply  f=forward  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	}
 }
 
 func (m Model) contentHeight() int {
@@ -457,8 +537,8 @@ func (m Model) View() string {
 		b.WriteString(searchBar + "\n")
 	}
 
-	// 4. Keybinds bar (appended at the bottom)
-	keybindText := " j/k=nav  o=open  c=compose  d=trash  p=preview  /=search  R=refresh  tab=folder  q=quit"
+	// 4. Keybinds bar (appended at the bottom) — adapts to active folder
+	keybindText := m.keybindsForFolder()
 	keybinds := common.StatusBar.Width(m.width).Render(keybindText)
 
 	contentHeight := m.contentHeight()

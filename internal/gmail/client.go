@@ -20,6 +20,8 @@ type Client interface {
 	ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error
 	ForwardMessage(ctx context.Context, messageID, to string) error
 	TrashMessage(ctx context.Context, id string) error
+	UntrashMessage(ctx context.Context, id string) error
+	DeleteMessage(ctx context.Context, id string) error
 	MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error
 }
 
@@ -175,6 +177,15 @@ func (c *gmailClient) ForwardMessage(ctx context.Context, messageID, to string) 
 func (c *gmailClient) TrashMessage(ctx context.Context, id string) error {
 	_, err := c.svc.Users.Messages.Trash(c.user, id).Context(ctx).Do()
 	return err
+}
+
+func (c *gmailClient) UntrashMessage(ctx context.Context, id string) error {
+	_, err := c.svc.Users.Messages.Untrash(c.user, id).Context(ctx).Do()
+	return err
+}
+
+func (c *gmailClient) DeleteMessage(ctx context.Context, id string) error {
+	return c.svc.Users.Messages.Delete(c.user, id).Context(ctx).Do()
 }
 
 func (c *gmailClient) MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error {
