@@ -100,7 +100,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cached, ok := a.msgCache[id]; ok {
 			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height, a.inbox.TabIdx())
 			a.active = screenReader
-			return a, tea.Batch(a.reader.Init(), tea.DisableMouse, a.markAsRead(id))
+			return a, tea.Batch(a.reader.Init(), a.markAsRead(id))
 		}
 		// Show loading state, fetch in background
 		a.loading = true
@@ -146,12 +146,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.inbox.MarkRead(msg.msg.ID) // optimistic local update
 		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
-		return a, tea.Batch(a.reader.Init(), tea.DisableMouse, a.markAsRead(msg.msg.ID))
+		return a, tea.Batch(a.reader.Init(), a.markAsRead(msg.msg.ID))
 
 	case common.OpenMessageMsg:
 		a.reader = reader.New(a.ctx, a.client, msg.Message, a.width, a.height, a.inbox.TabIdx())
 		a.active = screenReader
-		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
+		return a, a.reader.Init()
 
 	case common.ComposeMsg:
 		a.composer = composer.New(a.ctx, a.client, a.cfg.Editor(), msg.Template, a.width, a.height)
@@ -161,7 +161,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.BackToInboxMsg:
 		a.active = screenInbox
 		a.status = ""
-		return a, tea.EnableMouseCellMotion
+		return a, nil
 
 	case common.SendResultMsg:
 		a.active = screenInbox
@@ -172,7 +172,6 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tea.Batch(
 			a.inbox.Init(),
-			tea.EnableMouseCellMotion,
 			func() tea.Msg { return common.StatusMsg{Text: a.status} },
 		)
 
