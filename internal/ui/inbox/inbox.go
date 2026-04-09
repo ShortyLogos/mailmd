@@ -596,6 +596,16 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 
+		case key.Matches(msg, key.NewBinding(key.WithKeys("left"))):
+			// Left arrow = previous folder in inbox view
+			m.tabIdx = (m.tabIdx - 1 + len(folders)) % len(folders)
+			m.searchQuery = ""
+			m.searchCache = nil
+			m.searching = false
+			m.syncing = true
+			m.err = ""
+			return m, m.fetchMessages()
+
 		case key.Matches(msg, common.Keys.NextTab):
 			m.tabIdx = (m.tabIdx + 1) % len(folders)
 			m.searchQuery = ""
