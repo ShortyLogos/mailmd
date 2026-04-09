@@ -83,9 +83,8 @@ func (m *Model) renderBody() string {
 	m.links = nil
 	body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
 		m.links = append(m.links, rawURL)
-		label := compactURL(rawURL, 40)
-		ref := fmt.Sprintf("[%d: %s]", len(m.links), label)
-		return common.LinkRefStyle.Render(ref)
+		label := compactURL(rawURL, 50)
+		return fmt.Sprintf("[%d: %s]", len(m.links), label)
 	})
 
 	// Wrap text at 80 chars
