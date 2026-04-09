@@ -3,6 +3,7 @@ package ui
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/deric/mailmd/internal/config"
@@ -47,17 +48,20 @@ type App struct {
 	reader   reader.Model
 	composer composer.Model
 
-	status string
+	status   string
+	loading  bool                    // true while fetching a message to open
+	msgCache map[string]*gmail.Message // message ID → full message
 }
 
 // New creates and returns the root app model.
 func New(ctx context.Context, client gmail.Client, cfg config.Config) App {
 	return App{
-		ctx:    ctx,
-		client: client,
-		cfg:    cfg,
-		active: screenInbox,
-		inbox:  inbox.New(ctx, client),
+		ctx:      ctx,
+		client:   client,
+		cfg:      cfg,
+		active:   screenInbox,
+		inbox:    inbox.New(ctx, client),
+		msgCache: make(map[string]*gmail.Message),
 	}
 }
 
@@ -90,36 +94,54 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// --- Cross-screen transitions ---
 
 	case common.FetchMessageMsg:
-		// Inbox wants to open a message; fetch it fully first.
 		id := msg.ID
+		// Check cache first
+		if cached, ok := a.msgCache[id]; ok {
+			a.reader = reader.New(a.ctx, a.client, cached, a.width, a.height)
+			a.active = screenReader
+			return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
+		}
+		// Show loading state, fetch in background
+		a.loading = true
 		return a, func() tea.Msg {
 			full, err := a.client.GetMessage(a.ctx, id)
 			return fetchMsgResultMsg{msg: full, err: err}
 		}
 
 	case common.FetchAndReplyMsg:
-		// Inbox wants to reply directly; fetch then compose.
 		id := msg.ID
+		// Check cache first
+		if cached, ok := a.msgCache[id]; ok {
+			tmpl := markdown.ReplyTemplate(cached.From, "Re: "+cached.Subject, cached.Body)
+			a.composer = composer.New(a.ctx, a.client, a.cfg.Editor(), tmpl, a.width, a.height)
+			a.active = screenCompose
+			return a, a.composer.Init()
+		}
+		a.loading = true
 		return a, func() tea.Msg {
 			full, err := a.client.GetMessage(a.ctx, id)
 			return fetchReplyResultMsg{msg: full, err: err}
 		}
 
 	case fetchReplyResultMsg:
+		a.loading = false
 		if msg.err != nil {
 			a.status = fmt.Sprintf("Error fetching message: %v", msg.err)
 			return a, nil
 		}
+		a.msgCache[msg.msg.ID] = msg.msg
 		tmpl := markdown.ReplyTemplate(msg.msg.From, "Re: "+msg.msg.Subject, msg.msg.Body)
 		a.composer = composer.New(a.ctx, a.client, a.cfg.Editor(), tmpl, a.width, a.height)
 		a.active = screenCompose
 		return a, a.composer.Init()
 
 	case fetchMsgResultMsg:
+		a.loading = false
 		if msg.err != nil {
 			a.status = fmt.Sprintf("Error fetching message: %v", msg.err)
 			return a, nil
 		}
+		a.msgCache[msg.msg.ID] = msg.msg
 		a.reader = reader.New(a.ctx, a.client, msg.msg, a.width, a.height)
 		a.active = screenReader
 		return a, tea.Batch(a.reader.Init(), tea.DisableMouse)
@@ -174,6 +196,16 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // View delegates to the active screen.
 func (a App) View() string {
+	if a.loading {
+		// Show inbox with a loading indicator overlaid on the status line
+		view := a.inbox.View()
+		// Replace last line with loading message
+		lines := strings.Split(view, "\n")
+		if len(lines) > 1 {
+			lines[len(lines)-2] = common.StatusBar.Width(a.width).Render(" Opening message...")
+		}
+		return strings.Join(lines, "\n")
+	}
 	switch a.active {
 	case screenReader:
 		return a.reader.View()
