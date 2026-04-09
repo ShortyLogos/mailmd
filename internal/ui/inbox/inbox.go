@@ -494,7 +494,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, textinput.Blink
 
 		case key.Matches(msg, common.Keys.Back):
-			// Esc clears search if active
+			// Esc: clear selection first, then search
+			if len(fc.selected) > 0 {
+				fc.selected = make(map[string]bool)
+				return m, nil
+			}
 			if m.searchQuery != "" {
 				m.searchQuery = ""
 				m.searchCache = nil
