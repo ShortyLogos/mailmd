@@ -3,9 +3,11 @@ package reader
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 
@@ -70,6 +72,10 @@ func (m Model) renderBody() string {
 	if body == "" {
 		body = "(No message body)"
 	}
+
+	// Convert bare URLs to markdown links with short display text
+	// Glamour renders these as OSC 8 clickable hyperlinks in supported terminals
+	body = shortenURLs(body)
 
 	// Wrap text at 80 chars but preserve URLs on single lines
 	body = wrapText(body, 80)
@@ -291,6 +297,38 @@ func (m Model) View() string {
 	b.WriteString(common.StatusBar.Width(m.width).Render(status))
 
 	return b.String()
+}
+
+var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
+
+// shortenURLs converts bare URLs to markdown links with truncated display text.
+// e.g. "https://example.com/very/long/path?q=1" → "[example.com/very/long/...](https://example.com/very/long/path?q=1)"
+// Glamour renders these as OSC 8 clickable hyperlinks in terminals that support it (Ghostty, Kitty, iTerm2).
+func shortenURLs(text string) string {
+	return urlRegex.ReplaceAllStringFunc(text, func(rawURL string) string {
+		display := shortenURL(rawURL, 50)
+		// Don't convert if already inside a markdown link
+		return "[" + display + "](" + rawURL + ")"
+	})
+}
+
+func shortenURL(rawURL string, maxLen int) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		if len(rawURL) > maxLen {
+			return rawURL[:maxLen-3] + "..."
+		}
+		return rawURL
+	}
+	// Show host + truncated path
+	display := u.Host + u.Path
+	if u.RawQuery != "" {
+		display += "?" + u.RawQuery
+	}
+	if len(display) > maxLen {
+		return display[:maxLen-3] + "..."
+	}
+	return display
 }
 
 // wrapText wraps lines at maxWidth on word boundaries, but leaves URLs intact.
