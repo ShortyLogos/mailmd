@@ -93,6 +93,7 @@ func New(ctx context.Context, client gmail.Client) Model {
 		client:      client,
 		cache:       make(map[int]*folderCache),
 		searchInput: ti,
+		syncing:     true, // first load
 	}
 }
 
