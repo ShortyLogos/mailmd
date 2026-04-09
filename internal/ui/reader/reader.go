@@ -223,6 +223,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.viewport.LineDown(7)
 			return m, nil
 
+		case key.Matches(msg, common.Keys.BPreview):
+			if m.message != nil {
+				url := "https://mail.google.com/mail/u/0/#inbox/" + m.message.ID
+				openFile(url)
+			}
+			return m, nil
+
 		case key.Matches(msg, common.Keys.Quit):
 			return m, tea.Quit
 
@@ -294,7 +301,7 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View() + "\n")
 
 	// Status bar
-	status := " esc=back  r=reply  f=forward  j/k=scroll  q=quit"
+	status := " esc=back  r=reply  f=forward  P=open in browser  j/k=scroll  q=quit"
 	if len(m.message.Attachments) > 0 {
 		status += "  1-9=open attachment"
 		hasImages := false
