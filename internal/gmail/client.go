@@ -20,10 +20,15 @@ type Client interface {
 	ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error
 	ForwardMessage(ctx context.Context, messageID, to string) error
 	TrashMessage(ctx context.Context, id string) error
+	TrashMessages(ctx context.Context, ids []string) error
 	UntrashMessage(ctx context.Context, id string) error
 	DeleteMessage(ctx context.Context, id string) error
+	DeleteMessages(ctx context.Context, ids []string) error
 	MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
+	CheckAttachments(ctx context.Context, ids []string) (map[string]bool, error)
+	GetProfile(ctx context.Context) (string, error)
+	BlockSender(ctx context.Context, senderEmail string) error
 }
 
 type gmailClient struct {
@@ -194,6 +199,26 @@ func (c *gmailClient) DeleteMessage(ctx context.Context, id string) error {
 	return c.svc.Users.Messages.Delete(c.user, id).Context(ctx).Do()
 }
 
+func (c *gmailClient) DeleteMessages(ctx context.Context, ids []string) error {
+	if len(ids) == 1 {
+		return c.DeleteMessage(ctx, ids[0])
+	}
+	req := &gapi.BatchDeleteMessagesRequest{Ids: ids}
+	return c.svc.Users.Messages.BatchDelete(c.user, req).Context(ctx).Do()
+}
+
+func (c *gmailClient) TrashMessages(ctx context.Context, ids []string) error {
+	if len(ids) == 1 {
+		return c.TrashMessage(ctx, ids[0])
+	}
+	req := &gapi.BatchModifyMessagesRequest{
+		Ids:            ids,
+		AddLabelIds:    []string{"TRASH"},
+		RemoveLabelIds: []string{"INBOX"},
+	}
+	return c.svc.Users.Messages.BatchModify(c.user, req).Context(ctx).Do()
+}
+
 func (c *gmailClient) MoveMessage(ctx context.Context, id string, addLabels, removeLabels []string) error {
 	req := &gapi.ModifyMessageRequest{AddLabelIds: addLabels, RemoveLabelIds: removeLabels}
 	_, err := c.svc.Users.Messages.Modify(c.user, id, req).Context(ctx).Do()
@@ -206,4 +231,58 @@ func (c *gmailClient) GetAttachment(ctx context.Context, messageID, attachmentID
 		return nil, err
 	}
 	return base64.URLEncoding.DecodeString(resp.Data)
+}
+
+// CheckAttachments fetches lightweight part structure for each message
+// and returns which ones have real (non-inline) attachments.
+func (c *gmailClient) CheckAttachments(ctx context.Context, ids []string) (map[string]bool, error) {
+	type result struct {
+		id  string
+		has bool
+	}
+	ch := make(chan result, len(ids))
+	for _, id := range ids {
+		go func(id string) {
+			msg, err := c.svc.Users.Messages.Get(c.user, id).
+				Format("full").
+				Fields("payload(filename,headers,body(attachmentId,size),parts(filename,headers,body(attachmentId,size),parts(filename,headers,body(attachmentId,size),parts(filename,headers,body(attachmentId,size)))))").
+				Context(ctx).
+				Do()
+			if err != nil {
+				ch <- result{id: id, has: false}
+				return
+			}
+			ch <- result{id: id, has: hasAttachments(msg.Payload)}
+		}(id)
+	}
+	out := make(map[string]bool, len(ids))
+	for range ids {
+		r := <-ch
+		if r.has {
+			out[r.id] = true
+		}
+	}
+	return out, nil
+}
+
+func (c *gmailClient) BlockSender(ctx context.Context, senderEmail string) error {
+	filter := &gapi.Filter{
+		Criteria: &gapi.FilterCriteria{
+			From: senderEmail,
+		},
+		Action: &gapi.FilterAction{
+			AddLabelIds:    []string{"TRASH"},
+			RemoveLabelIds: []string{"INBOX"},
+		},
+	}
+	_, err := c.svc.Users.Settings.Filters.Create(c.user, filter).Context(ctx).Do()
+	return err
+}
+
+func (c *gmailClient) GetProfile(ctx context.Context) (string, error) {
+	profile, err := c.svc.Users.GetProfile(c.user).Context(ctx).Do()
+	if err != nil {
+		return "", err
+	}
+	return profile.EmailAddress, nil
 }
