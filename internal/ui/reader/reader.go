@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"fmt"
+	"html"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,6 +83,9 @@ func (m Model) Init() tea.Cmd {
 	msg := m.message
 	return func() tea.Msg {
 		body := msg.Body
+		if body == "" && msg.HTMLBody != "" {
+			body = stripHTML(msg.HTMLBody)
+		}
 		if body == "" {
 			body = "(No message body)"
 		}
@@ -131,6 +135,27 @@ func renderPlainEmail(body string) string {
 }
 
 var linkRefRegex = regexp.MustCompile(`\[\d+: [^\]]+\]`)
+
+// stripHTML converts HTML to readable plain text by removing tags,
+// converting block elements to newlines, and decoding entities.
+func stripHTML(s string) string {
+	// Replace block-level tags with newlines
+	for _, tag := range []string{"<br", "<BR", "<p", "<P", "<div", "<DIV", "<tr", "<TR", "<li", "<LI", "<h1", "<h2", "<h3", "<h4", "<h5", "<h6"} {
+		s = strings.ReplaceAll(s, tag, "\n"+tag)
+	}
+	// Remove style and script blocks entirely
+	styleRegex := regexp.MustCompile(`(?is)<style[^>]*>.*?</style>`)
+	scriptRegex := regexp.MustCompile(`(?is)<script[^>]*>.*?</script>`)
+	s = styleRegex.ReplaceAllString(s, "")
+	s = scriptRegex.ReplaceAllString(s, "")
+	// Strip all HTML tags
+	s = htmlTagRegex.ReplaceAllString(s, "")
+	// Decode HTML entities
+	s = html.UnescapeString(s)
+	// Collapse excessive blank lines
+	s = whitespaceRegex.ReplaceAllString(s, "\n\n")
+	return strings.TrimSpace(s)
+}
 var emailRegex = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
 func (m Model) openAttachment(idx int) tea.Cmd {
@@ -403,6 +428,8 @@ func (m Model) View() string {
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
 var mailtoRegex = regexp.MustCompile(`mailto:[^\s<>\[\]()]+`)
+var htmlTagRegex = regexp.MustCompile(`<[^>]*>`)
+var whitespaceRegex = regexp.MustCompile(`\n{3,}`)
 
 // compactURL returns a short readable form: "host/path..." truncated to maxLen.
 func compactURL(rawURL string, maxLen int) string {
