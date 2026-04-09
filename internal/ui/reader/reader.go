@@ -306,7 +306,7 @@ func (m Model) View() string {
 	b.WriteString(strings.Repeat("─", m.width) + "\n")
 
 	// Scrollable body
-	b.WriteString(m.viewport.View() + "\n")
+	b.WriteString(m.viewport.View())
 
 	// Status bar
 	status := " esc=back  r=reply  f=forward  P=open in browser  j/k=scroll  q=quit"
