@@ -23,12 +23,22 @@ func NewOAuthConfig(clientID, clientSecret, redirectURL string) *oauth2.Config {
 		Scopes: []string{
 			"https://www.googleapis.com/auth/gmail.modify",
 			"https://www.googleapis.com/auth/gmail.send",
+			"https://www.googleapis.com/auth/gmail.settings.basic",
 		},
 		Endpoint: google.Endpoint,
 	}
 }
 
 func Authenticate(ctx context.Context, clientID, clientSecret string, store *TokenStore) (*http.Client, error) {
+	return authenticate(ctx, clientID, clientSecret, store, false)
+}
+
+// AuthenticateSilent is like Authenticate but suppresses stdout prints (safe for TUI).
+func AuthenticateSilent(ctx context.Context, clientID, clientSecret string, store *TokenStore) (*http.Client, error) {
+	return authenticate(ctx, clientID, clientSecret, store, true)
+}
+
+func authenticate(ctx context.Context, clientID, clientSecret string, store *TokenStore, silent bool) (*http.Client, error) {
 	if store.Exists() {
 		token, err := store.Load()
 		if err == nil {
@@ -38,7 +48,7 @@ func Authenticate(ctx context.Context, clientID, clientSecret string, store *Tok
 		}
 	}
 
-	token, err := browserFlow(ctx, clientID, clientSecret)
+	token, err := browserFlow(ctx, clientID, clientSecret, silent)
 	if err != nil {
 		return nil, fmt.Errorf("authentication failed: %w", err)
 	}
@@ -51,7 +61,7 @@ func Authenticate(ctx context.Context, clientID, clientSecret string, store *Tok
 	return cfg.Client(ctx, token), nil
 }
 
-func browserFlow(ctx context.Context, clientID, clientSecret string) (*oauth2.Token, error) {
+func browserFlow(ctx context.Context, clientID, clientSecret string, silent bool) (*oauth2.Token, error) {
 	ln, err := net.Listen("tcp", "localhost:0")
 	if err != nil {
 		return nil, fmt.Errorf("failed to start callback server: %w", err)
@@ -76,8 +86,10 @@ func browserFlow(ctx context.Context, clientID, clientSecret string) (*oauth2.To
 	defer srv.Shutdown(ctx)
 
 	authURL := cfg.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-	fmt.Printf("Opening browser for authentication...\n")
-	fmt.Printf("If the browser doesn't open, visit:\n%s\n", authURL)
+	if !silent {
+		fmt.Printf("Opening browser for authentication...\n")
+		fmt.Printf("If the browser doesn't open, visit:\n%s\n", authURL)
+	}
 	openBrowser(authURL)
 
 	var code string

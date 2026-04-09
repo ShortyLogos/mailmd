@@ -5,9 +5,17 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/oauth2"
 )
+
+// AccountTokenPath returns the token file path for a specific account email.
+func AccountTokenPath(configDir, email string) string {
+	safe := strings.ReplaceAll(email, "@", "_at_")
+	safe = strings.ReplaceAll(safe, ".", "_")
+	return filepath.Join(configDir, "mailmd", "tokens", safe+".json")
+}
 
 type TokenStore struct {
 	path string

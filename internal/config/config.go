@@ -7,10 +7,17 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
+type Account struct {
+	Name  string `toml:"name"`
+	Email string `toml:"email"`
+}
+
 type Config struct {
-	General     General     `toml:"general"`
-	Keybindings Keybindings `toml:"keybindings"`
-	Preview     Preview     `toml:"preview"`
+	General       General     `toml:"general"`
+	Keybindings   Keybindings `toml:"keybindings"`
+	Preview       Preview     `toml:"preview"`
+	Accounts      []Account   `toml:"accounts"`
+	LastAccount   string      `toml:"last_account,omitempty"`
 }
 
 type General struct {
@@ -75,6 +82,17 @@ func LoadOrCreate(path string) (Config, error) {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+// AddAccount appends a new account and persists the config.
+func AddAccount(path string, cfg *Config, name, email string) error {
+	cfg.Accounts = append(cfg.Accounts, Account{Name: name, Email: email})
+	return Save(path, *cfg)
+}
+
+// Save persists the config to disk.
+func Save(path string, cfg Config) error {
+	return save(path, cfg)
 }
 
 func save(path string, cfg Config) error {
