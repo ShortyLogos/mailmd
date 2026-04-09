@@ -700,20 +700,21 @@ func (m Model) View() string {
 	// Fixed left zone = 1(pad) + numW+1(numCol) + 2(check) + 2(unread+space) + fromW + 2(gap)
 	leftZoneW := 1 + numW + 1 + 2 + 2 + fromW + 2
 
-	// Build left content: count + sync
+	// Build left content: count + sync (icon is always 1 char to prevent shift)
 	syncText := ""
 	if m.syncing {
 		syncText = m.spinner.View() + " " + common.SyncingStyle.Render("Syncing...")
 	} else if m.err != "" {
-		syncText = common.ErrorStyle.Render("Error: " + m.err)
+		syncText = common.ErrorStyle.Render("! Error: " + m.err)
 	} else if !fc.lastSync.IsZero() {
+		check := common.SyncedStyle.Render("✓")
 		ago := time.Since(fc.lastSync).Truncate(time.Second)
 		if ago < 5*time.Second {
-			syncText = common.SyncedStyle.Render("Synced")
+			syncText = check + " " + common.SyncedStyle.Render("Synced")
 		} else if ago < time.Minute {
-			syncText = common.SyncedStyle.Render(fmt.Sprintf("Synced %ds ago", int(ago.Seconds())))
+			syncText = check + " " + common.SyncedStyle.Render(fmt.Sprintf("Synced %ds ago", int(ago.Seconds())))
 		} else {
-			syncText = common.MutedStyle.Render(fmt.Sprintf("Synced %dm ago", int(ago.Minutes())))
+			syncText = check + " " + common.MutedStyle.Render(fmt.Sprintf("Synced %dm ago", int(ago.Minutes())))
 		}
 	}
 	countText := common.MutedStyle.Render(fmt.Sprintf("%d messages", len(fc.messages)))
