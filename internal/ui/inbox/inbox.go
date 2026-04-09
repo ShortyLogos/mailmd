@@ -435,7 +435,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		m.status = msg.Text
 
 	case spinner.TickMsg:
-		if m.syncing {
+		if m.syncing || m.statusLoading {
 			var cmd tea.Cmd
 			m.spinner, cmd = m.spinner.Update(msg)
 			return m, cmd
