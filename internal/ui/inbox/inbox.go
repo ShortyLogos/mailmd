@@ -512,6 +512,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return common.FetchMessageMsg{ID: id} }
 			}
 
+		case key.Matches(msg, common.Keys.Reply):
+			// Quick reply from inbox — only when no multi-select
+			if len(fc.selected) == 0 && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				id := fc.messages[fc.cursor].ID
+				return m, func() tea.Msg { return common.FetchAndReplyMsg{ID: id} }
+			}
+
 		case key.Matches(msg, common.Keys.Compose):
 			tmpl := markdown.ComposeTemplate()
 			return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
@@ -612,15 +619,25 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 	label := m.currentLabelID()
 	suffix := "  /=search  R=refresh  tab=folder  q=quit"
 
+	noSel := len(fc.selected) == 0
+
 	switch label {
 	case "TRASH":
 		return base + "  d=delete  u=restore" + suffix
 	case "DRAFT":
 		return base + "  d=delete" + suffix
 	case "SENT":
-		return base + "  d=trash  f=forward" + suffix
+		extra := "  d=trash"
+		if noSel {
+			extra += "  r=reply  f=forward"
+		}
+		return base + extra + suffix
 	default: // INBOX
-		return base + "  d=trash" + suffix
+		extra := "  d=trash"
+		if noSel {
+			extra += "  r=reply"
+		}
+		return base + extra + suffix
 	}
 }
 

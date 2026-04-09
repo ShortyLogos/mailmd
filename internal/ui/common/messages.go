@@ -20,3 +20,7 @@ type StatusMsg struct{ Text string }
 // FetchMessageMsg is sent when the inbox wants to open a message by ID.
 // The app shell handles this by fetching the full message, then sends OpenMessageMsg.
 type FetchMessageMsg struct{ ID string }
+
+// FetchAndReplyMsg is sent when the inbox wants to reply to a message directly.
+// The app shell fetches the full message, then opens the compose flow with a reply template.
+type FetchAndReplyMsg struct{ ID string }

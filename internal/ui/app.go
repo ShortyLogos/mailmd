@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/deric/mailmd/internal/config"
 	"github.com/deric/mailmd/internal/gmail"
+	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
 	"github.com/deric/mailmd/internal/ui/composer"
 	"github.com/deric/mailmd/internal/ui/inbox"
@@ -21,8 +22,14 @@ const (
 	screenCompose
 )
 
-// fetchMsgResultMsg carries the result of fetching a full message.
+// fetchMsgResultMsg carries the result of fetching a full message (for reader).
 type fetchMsgResultMsg struct {
+	msg *gmail.Message
+	err error
+}
+
+// fetchReplyResultMsg carries the result of fetching a message for quick reply.
+type fetchReplyResultMsg struct {
 	msg *gmail.Message
 	err error
 }
@@ -89,6 +96,24 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			full, err := a.client.GetMessage(a.ctx, id)
 			return fetchMsgResultMsg{msg: full, err: err}
 		}
+
+	case common.FetchAndReplyMsg:
+		// Inbox wants to reply directly; fetch then compose.
+		id := msg.ID
+		return a, func() tea.Msg {
+			full, err := a.client.GetMessage(a.ctx, id)
+			return fetchReplyResultMsg{msg: full, err: err}
+		}
+
+	case fetchReplyResultMsg:
+		if msg.err != nil {
+			a.status = fmt.Sprintf("Error fetching message: %v", msg.err)
+			return a, nil
+		}
+		tmpl := markdown.ReplyTemplate(msg.msg.From, "Re: "+msg.msg.Subject, msg.msg.Body)
+		a.composer = composer.New(a.ctx, a.client, a.cfg.Editor(), tmpl, a.width, a.height)
+		a.active = screenCompose
+		return a, a.composer.Init()
 
 	case fetchMsgResultMsg:
 		if msg.err != nil {
