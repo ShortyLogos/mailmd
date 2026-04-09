@@ -754,6 +754,10 @@ func (m Model) View() string {
 	}
 
 	hasSelection := len(fc.selected) > 0
+	checkW := 0
+	if hasSelection {
+		checkW = 2
+	}
 	// Line number column width (e.g., 2 digits for ≤99 messages, 3 for ≤999)
 	numW := len(strconv.Itoa(len(fc.messages)))
 	if numW < 2 {
@@ -763,33 +767,37 @@ func (m Model) View() string {
 
 	for i := start; i < end; i++ {
 		msg := fc.messages[i]
-		// Line number (1-indexed, right-aligned, dimmed)
-		lineNum := common.MutedStyle.Render(fmt.Sprintf("%*d", numW, i+1)) + " "
+		// Build raw text line (no ANSI codes) — styled as a whole at the end
+		lineNum := fmt.Sprintf("%*d ", numW, i+1)
 
-		// Selection checkbox prefix
-		checkW := 0
 		check := ""
 		if hasSelection {
-			checkW = 2
 			if fc.selected[msg.ID] {
 				check = "> "
 			} else {
 				check = "  "
 			}
 		}
-		line := formatMessageLine(msg, listWidth-2-numColW-checkW)
-		line = lineNum + check + line
-		line = runewidthPadRight(line, listWidth-2)
+
+		content := formatMessageLine(msg, listWidth-2-numColW-checkW)
+		raw := lineNum + check + content
+		raw = runewidthPadRight(raw, listWidth-2)
+
+		// Apply single style to the entire line
 		if i == fc.cursor {
-			line = common.SelectedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
+			listLines = append(listLines, common.SelectedMessage.Padding(0, 0).Width(0).Render(" "+raw+" "))
 		} else if fc.selected[msg.ID] {
-			line = common.CheckedMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
+			listLines = append(listLines, common.CheckedMessage.Padding(0, 0).Width(0).Render(" "+raw+" "))
 		} else if msg.Unread {
-			line = common.UnreadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
+			listLines = append(listLines, common.UnreadMessage.Padding(0, 0).Width(0).Render(" "+raw+" "))
 		} else {
-			line = common.ReadMessage.Padding(0, 0).Width(0).Render(" " + line + " ")
+			// Dim line number, normal style for the rest
+			styledNum := common.MutedStyle.Render(lineNum)
+			rest := check + content
+			rest = runewidthPadRight(rest, listWidth-2-numColW)
+			line := common.ReadMessage.Padding(0, 0).Width(0).Render(" " + styledNum + rest + " ")
+			listLines = append(listLines, line)
 		}
-		listLines = append(listLines, line)
 	}
 	for len(listLines) < contentHeight {
 		listLines = append(listLines, "")
