@@ -431,7 +431,7 @@ func (m Model) View() string {
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
 var mailtoRegex = regexp.MustCompile(`mailto:[^\s<>\[\]()]+`)
-var dupEmailRegex = regexp.MustCompile(`([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})<\1>`)
+var dupEmailRegex = regexp.MustCompile(`([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})<[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}>`)
 var htmlTagRegex = regexp.MustCompile(`<[^>]*>`)
 var whitespaceRegex = regexp.MustCompile(`\n{3,}`)
 
