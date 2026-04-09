@@ -103,6 +103,9 @@ func (m Model) Init() tea.Cmd {
 			return strings.TrimPrefix(rawURL, "mailto:")
 		})
 
+		// Deduplicate "email@addr<email@addr>" → "email@addr"
+		body = dupEmailRegex.ReplaceAllString(body, "$1")
+
 		// Wrap text
 		body = wrapText(body, 80)
 
@@ -428,6 +431,7 @@ func (m Model) View() string {
 
 var urlRegex = regexp.MustCompile(`https?://[^\s<>\[\]()]+`)
 var mailtoRegex = regexp.MustCompile(`mailto:[^\s<>\[\]()]+`)
+var dupEmailRegex = regexp.MustCompile(`([a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,})<\1>`)
 var htmlTagRegex = regexp.MustCompile(`<[^>]*>`)
 var whitespaceRegex = regexp.MustCompile(`\n{3,}`)
 
