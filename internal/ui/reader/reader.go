@@ -27,19 +27,26 @@ var folders = []string{"Inbox", "Drafts", "Sent", "Trash"}
 
 // Model is the reader Bubble Tea model.
 type Model struct {
-	ctx      context.Context
-	client   gmail.Client
-	message  *gmail.Message
-	viewport viewport.Model
-	width    int
-	height   int
-	ready    bool
-	tabIdx   int      // active folder tab (for display only)
-	links    []string // extracted URLs, indexed from 1
-	goLink   bool     // true when waiting for link number after 'g'
+	ctx             context.Context
+	client          gmail.Client
+	message         *gmail.Message
+	viewport        viewport.Model
+	width           int
+	height          int
+	ready           bool
+	tabIdx          int      // active folder tab (for display only)
+	links           []string // extracted URLs, indexed from 1
+	goLink          bool     // true when waiting for link number after 'g'
+	renderedContent string   // cached rendered body for resize
 }
 
 // New creates a new reader model for the given message.
+// bodyRenderedMsg carries the result of async body rendering.
+type bodyRenderedMsg struct {
+	content string
+	links   []string
+}
+
 func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int) Model {
 	m := Model{
 		ctx:     ctx,
@@ -49,11 +56,11 @@ func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, he
 		height:  height,
 		tabIdx:  tabIdx,
 	}
-	m.initViewport()
+	m.initViewport("  Loading content...")
 	return m
 }
 
-func (m *Model) initViewport() {
+func (m *Model) initViewport(content string) {
 	// Tab bar(1) + border(1) + From(1) + To(1) + Subject(1) + Date(1) + separator(1) + status(2)
 	chrome := 9
 	if len(m.message.Attachments) > 0 {
@@ -65,48 +72,45 @@ func (m *Model) initViewport() {
 	}
 
 	m.viewport = viewport.New(m.width, vpHeight)
-	m.viewport.SetContent(m.renderBody())
+	m.viewport.SetContent(content)
 	m.ready = true
 }
 
-func (m *Model) renderBody() string {
-	if m.message == nil {
-		return ""
-	}
 
-	body := m.message.Body
-	if body == "" {
-		body = "(No message body)"
-	}
-
-	// Extract URLs and replace with inline numbered references
-	m.links = nil
-	body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
-		m.links = append(m.links, rawURL)
-		label := compactURL(rawURL, 50)
-		return fmt.Sprintf("[%d: %s]", len(m.links), label)
-	})
-
-	// Wrap text at 80 chars
-	body = wrapText(body, 80)
-
-	r, err := glamour.NewTermRenderer(
-		glamour.WithAutoStyle(),
-		glamour.WithWordWrap(0),
-	)
-	if err != nil {
-		return markdown.ConvertPlain(body)
-	}
-	rendered, err := r.Render(body)
-	if err != nil {
-		return markdown.ConvertPlain(body)
-	}
-	return rendered
-}
-
-// Init is a no-op for reader.
+// Init starts async body rendering.
 func (m Model) Init() tea.Cmd {
-	return nil
+	msg := m.message
+	return func() tea.Msg {
+		// This runs in a goroutine — heavy rendering doesn't block the UI
+		body := msg.Body
+		if body == "" {
+			body = "(No message body)"
+		}
+
+		// Extract URLs and replace with numbered references
+		var links []string
+		body = urlRegex.ReplaceAllStringFunc(body, func(rawURL string) string {
+			links = append(links, rawURL)
+			label := compactURL(rawURL, 50)
+			return fmt.Sprintf("[%d: %s]", len(links), label)
+		})
+
+		body = wrapText(body, 80)
+
+		r, err := glamour.NewTermRenderer(
+			glamour.WithAutoStyle(),
+			glamour.WithWordWrap(0),
+		)
+		if err != nil {
+			return bodyRenderedMsg{content: body, links: links}
+		}
+		rendered, err := r.Render(body)
+		if err != nil {
+			return bodyRenderedMsg{content: body, links: links}
+		}
+
+		return bodyRenderedMsg{content: rendered, links: links}
+	}
 }
 
 func (m Model) openAttachment(idx int) tea.Cmd {
@@ -193,7 +197,14 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.initViewport()
+		m.initViewport(m.renderedContent)
+
+	case bodyRenderedMsg:
+		m.links = msg.links
+		m.renderedContent = msg.content
+		m.viewport.SetContent(msg.content)
+		m.viewport.GotoTop()
+		return m, nil
 
 	case attachmentOpenedMsg:
 		// Could show status, for now just ignore errors silently
