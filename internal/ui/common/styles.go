@@ -41,4 +41,7 @@ var (
 
 	// Search input
 	SearchInputStyle = lipgloss.NewStyle().Foreground(White).Background(InputBg).Padding(0, 1)
+
+	// Inline link references in reader
+	LinkRefStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Italic(true) // Sky blue
 )
