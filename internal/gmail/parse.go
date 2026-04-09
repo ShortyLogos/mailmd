@@ -53,6 +53,12 @@ func hasAttachments(part *gapi.MessagePart) bool {
 	if part == nil {
 		return false
 	}
+	// In metadata format, parts aren't populated but MimeType is.
+	// multipart/mixed typically means the message has attachments.
+	if part.MimeType == "multipart/mixed" {
+		return true
+	}
+	// In full format, check for parts with filenames
 	if part.Filename != "" && part.Body != nil && part.Body.AttachmentId != "" {
 		return true
 	}
