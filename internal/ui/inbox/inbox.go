@@ -1014,10 +1014,24 @@ func (m Model) View() string {
 	// 1. Tab bar at top
 	tabs := make([]string, len(folders))
 	for i, f := range folders {
+		label := f.name
+		if f.labelID == "INBOX" {
+			if c := m.cache[i]; c != nil {
+				unread := 0
+				for _, msg := range c.messages {
+					if msg.Unread {
+						unread++
+					}
+				}
+				if unread > 0 {
+					label = fmt.Sprintf("%s (%d)", f.name, unread)
+				}
+			}
+		}
 		if i == m.tabIdx {
-			tabs[i] = common.ActiveTab.Render(f.name)
+			tabs[i] = common.ActiveTab.Render(label)
 		} else {
-			tabs[i] = common.InactiveTab.Render(f.name)
+			tabs[i] = common.InactiveTab.Render(label)
 		}
 	}
 	tabContent := strings.Join(tabs, "")
