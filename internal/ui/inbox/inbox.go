@@ -46,6 +46,7 @@ type moreMessagesMsg struct {
 	nextPageToken string
 	err           error
 	tabIdx        int
+	query         string // non-empty for search "load more"
 }
 
 // trashDoneMsg signals a trash operation completed.
@@ -210,12 +211,13 @@ func (m Model) fetchMessages() tea.Cmd {
 }
 
 func (m Model) fetchSearch(query string) tea.Cmd {
+	labelID := folders[m.tabIdx].labelID
 	return func() tea.Msg {
-		list, err := m.client.ListMessages(m.ctx, "INBOX", query, "")
+		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
 		if err != nil {
 			return messagesLoadedMsg{err: err, tabIdx: -1, query: query}
 		}
-		return messagesLoadedMsg{messages: list.Messages, tabIdx: -1, query: query}
+		return messagesLoadedMsg{messages: list.Messages, nextPageToken: list.NextPageToken, tabIdx: -1, query: query}
 	}
 }
 
@@ -234,11 +236,21 @@ func (m Model) maybePrefetch(fc *folderCache) tea.Cmd {
 }
 
 func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
+	labelID := folders[m.tabIdx].labelID
+	// If searching, pass the active query and tag as search (tabIdx -1)
+	if m.searchQuery != "" {
+		query := m.searchQuery
+		return func() tea.Msg {
+			list, err := m.client.ListMessages(m.ctx, labelID, query, pageToken)
+			if err != nil {
+				return moreMessagesMsg{err: err, tabIdx: -1, query: query}
+			}
+			return moreMessagesMsg{messages: list.Messages, nextPageToken: list.NextPageToken, tabIdx: -1, query: query}
+		}
+	}
 	tabIdx := m.tabIdx
-	labelID := folders[tabIdx].labelID
-	query := ""
 	return func() tea.Msg {
-		list, err := m.client.ListMessages(m.ctx, labelID, query, pageToken)
+		list, err := m.client.ListMessages(m.ctx, labelID, "", pageToken)
 		if err != nil {
 			return moreMessagesMsg{err: err, tabIdx: tabIdx}
 		}
@@ -400,7 +412,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.err = msg.err.Error()
 			} else {
 				m.searchCache.messages = msg.messages
+				m.searchCache.nextPageToken = msg.nextPageToken
 				m.searchCache.cursor = 0
+				m.searchCache.loadingMore = false
 				m.err = ""
 			}
 			m.syncing = false
@@ -452,6 +466,22 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case moreMessagesMsg:
+		if msg.query != "" {
+			// Search "load more"
+			if m.searchCache == nil {
+				return m, nil
+			}
+			m.searchCache.loadingMore = false
+			if msg.err != nil {
+				return m, nil
+			}
+			m.searchCache.messages = append(m.searchCache.messages, msg.messages...)
+			m.searchCache.nextPageToken = msg.nextPageToken
+			if len(msg.messages) > 0 {
+				return m, m.enrichAttachments(msg.messages, -1)
+			}
+			return m, nil
+		}
 		if m.cache[msg.tabIdx] == nil {
 			return m, nil
 		}
@@ -780,12 +810,8 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				label := m.currentLabelID()
 				switch label {
 				case "TRASH":
-					if len(ids) == 1 {
-						m.status = fmt.Sprintf("Deleting \"%s\"...", truncate(subjects[0], 40))
-					} else {
-						m.status = fmt.Sprintf("Deleting %d messages...", len(ids))
-					}
-					return m, m.deleteMessages(ids)
+					// Permanent delete not supported by Gmail API; ignore
+					return m, nil
 				default:
 					if len(ids) == 1 {
 						m.status = fmt.Sprintf("Trashing \"%s\"...", truncate(subjects[0], 40))
@@ -896,7 +922,7 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 
 	switch label {
 	case "TRASH":
-		return base + "  d=delete  u=restore" + markHint + suffix
+		return base + "  u=restore" + markHint + suffix
 	case "DRAFT":
 		return base + "  d=trash" + markHint + suffix
 	case "SENT":
@@ -1093,6 +1119,8 @@ func (m Model) View() string {
 	checkW := 2
 	numColW := numW + 1 // number + space
 
+	attachStyle := lipgloss.NewStyle().Foreground(common.Warning)
+
 	for i := start; i < end; i++ {
 		msg := fc.messages[i]
 		// Build raw text line (no ANSI codes) — styled as a whole at the end
@@ -1115,10 +1143,14 @@ func (m Model) View() string {
 		} else if msg.Unread {
 			listLines = append(listLines, common.UnreadMessage.Padding(0, 0).Width(0).Render(" "+raw+" "))
 		} else {
-			// Dim line number, normal style for the rest
+			// Dim line number, colorize @ indicator, normal style for the rest
 			styledNum := common.MutedStyle.Render(lineNum)
 			rest := check + content
 			rest = runewidthPadRight(rest, listWidth-2-numColW)
+			// Colorize the "@ " attachment indicator within the read-message style
+			if msg.HasAttachments {
+				rest = strings.Replace(rest, "@ ", attachStyle.Render("@")+" ", 1)
+			}
 			line := common.ReadMessage.Padding(0, 0).Width(0).Render(" " + styledNum + rest + " ")
 			listLines = append(listLines, line)
 		}
@@ -1203,10 +1235,10 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)
 
-	// Fixed-width attachment indicator column (always 2 chars)
+	// Fixed-width attachment indicator column (always 1 char + 1 space)
 	attach := "  "
 	if msg.HasAttachments {
-		attach = "📎"
+		attach = "@ "
 	}
 
 	subjectW := width - 2 - fromW - 2 - 2 - 1 - 3 - dateW // unread(2) + from + gap(2) + attach(2) + gap(1) + gap(3) + date

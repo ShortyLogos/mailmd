@@ -145,7 +145,7 @@ func TestStripHTMLHeadingsMarked(t *testing.T) {
 
 func TestRenderPlainEmailConsumesHeadingMarker(t *testing.T) {
 	input := headingMarker + "My Heading\nNormal line"
-	result := renderPlainEmail(input)
+	result := renderPlainEmail(input, 80)
 
 	if strings.Contains(result, headingMarker) {
 		t.Errorf("heading marker should be consumed, got:\n%q", result)
@@ -158,12 +158,21 @@ func TestRenderPlainEmailConsumesHeadingMarker(t *testing.T) {
 	}
 }
 
-func TestWrapTextSkipsTableLines(t *testing.T) {
+func TestWrapTextWrapsWideTableLines(t *testing.T) {
 	line := "| " + strings.Repeat("x", 100) + " | " + strings.Repeat("y", 100) + " |"
 	result := wrapText(line+"\n", 80)
 	lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
+	if len(lines) < 2 {
+		t.Errorf("expected wide table line to be wrapped, got %d lines:\n%s", len(lines), result)
+	}
+}
+
+func TestWrapTextSkipsNarrowTableLines(t *testing.T) {
+	line := "| Name | Value |"
+	result := wrapText(line+"\n", 80)
+	lines := strings.Split(strings.TrimRight(result, "\n"), "\n")
 	if len(lines) != 1 {
-		t.Errorf("expected table line to not be wrapped, got %d lines:\n%s", len(lines), result)
+		t.Errorf("expected narrow table line to pass through, got %d lines:\n%s", len(lines), result)
 	}
 }
 

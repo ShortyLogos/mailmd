@@ -16,6 +16,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/deric/mailmd/internal/gmail"
 	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
@@ -69,8 +70,8 @@ func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, he
 }
 
 func (m *Model) initViewport(content string) {
-	// Tab bar(1) + border(1) + From(1) + To(1) + Subject(1) + Date(1) + separator(1) + status(2)
-	chrome := 9
+	// Tab bar(1) + border(1) + From(1) + To(1) + Subject(1) + Date(1) + separator(1) + gap(1) + status(2)
+	chrome := 10
 	if len(m.message.Attachments) > 0 {
 		chrome += len(m.message.Attachments)
 	}
@@ -79,7 +80,14 @@ func (m *Model) initViewport(content string) {
 		vpHeight = 1
 	}
 
-	m.viewport = viewport.New(m.width, vpHeight)
+	// Use width-1 so the viewport's padding never fills the terminal's last
+	// column — many terminals treat a char at the exact last column as a line
+	// wrap, adding an extra visual row that pushes the tab bar off screen.
+	vpWidth := m.width - 1
+	if vpWidth < 1 {
+		vpWidth = 1
+	}
+	m.viewport = viewport.New(vpWidth, vpHeight)
 	m.viewport.SetContent(content)
 	m.ready = true
 }
@@ -87,16 +95,27 @@ func (m *Model) initViewport(content string) {
 
 // Init starts body rendering (lightweight, no Glamour).
 func (m Model) Init() tea.Cmd {
+	return m.renderBody()
+}
+
+// renderBody builds the rendered email content asynchronously.
+// Called from Init() and on terminal resize.
+func (m Model) renderBody() tea.Cmd {
 	msg := m.message
-	width := m.width
+	// Content width matches viewport width (m.width-1). The viewport is
+	// 1 char narrower than the terminal to avoid the last-column wrap issue.
+	cw := m.width - 1
+	if cw < 10 {
+		cw = 10
+	}
 	return func() tea.Msg {
 		body := msg.Body
 		// Prefer HTML body when it contains tables, since Gmail's
 		// auto-generated plain text flattens table structure.
 		if msg.HTMLBody != "" && strings.Contains(strings.ToLower(msg.HTMLBody), "<table") {
-			body = stripHTML(msg.HTMLBody, width)
+			body = stripHTML(msg.HTMLBody, cw)
 		} else if body == "" && msg.HTMLBody != "" {
-			body = stripHTML(msg.HTMLBody, width)
+			body = stripHTML(msg.HTMLBody, cw)
 		}
 		if body == "" {
 			body = "(No message body)"
@@ -118,41 +137,215 @@ func (m Model) Init() tea.Cmd {
 		// Deduplicate "email@addr<email@addr>" → "email@addr"
 		body = dupEmailRegex.ReplaceAllString(body, "$1")
 
-		// Wrap text at terminal width
-		body = wrapText(body, width)
+		// Wrap text at content width
+		body = wrapText(body, cw)
 
-		// Lightweight styling — colorize link refs and mailto refs
-		rendered := renderPlainEmail(body)
+		// Re-wrap quoted sections to cw-2 to make room for │ border
+		body = rewrapQuotedSections(body, cw)
+
+		// Lightweight styling — colorize link refs, mailto refs, and quote headers
+		rendered := renderPlainEmail(body, cw)
+
+		// Final safety net for pathological content (e.g. minimum-width tables
+		// that genuinely cannot fit). Should rarely fire with the 1-char margin.
+		rendered = clampLineWidths(rendered, cw)
 
 		return bodyRenderedMsg{content: rendered, links: links}
 	}
 }
 
+// quoteHeaderRegex matches "On <date>, <person> wrote:" patterns.
+// Covers common formats: "On Apr 8, 2026 at 4:39 PM, Name <email> wrote:"
+// as well as "Le 8 avril 2026 ... a écrit :" (French) and similar.
+var quoteHeaderRegex = regexp.MustCompile(
+	`(?i)^(On |Le ).*(\bwrote:\s*$|\ba écrit\s*:\s*$|\bschrieb:\s*$|\bescribió:\s*$)`,
+)
+
+// quoteMarker is a non-printable prefix used to tag quoted lines
+// so renderPlainEmail can add the │ border and styling.
+const quoteMarker = "\x1c"
+
+// quoteHeaderPrefix tags the "On ... wrote:" line.
+const quoteHeaderPrefix = "\x1c\x1e"
+
+// rewrapQuotedSections detects "On X, Y wrote:" headers, re-wraps all
+// subsequent lines to width-2 (to make room for the │ border), and
+// prefixes them with quoteMarker so the renderer can style them.
+func rewrapQuotedSections(body string, width int) string {
+	lines := strings.Split(body, "\n")
+	var result strings.Builder
+	inQuote := false
+	maxW := width - 2
+	if maxW < 1 {
+		maxW = 1
+	}
+
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+
+		if quoteHeaderRegex.MatchString(trimmed) {
+			inQuote = true
+			// Blank line above header if previous line isn't blank
+			if i > 0 && strings.TrimSpace(lines[i-1]) != "" {
+				result.WriteString("\n")
+			}
+			// Wrap and tag the header line
+			for _, w := range wrapLine(line, width) {
+				result.WriteString(quoteHeaderPrefix + w + "\n")
+			}
+			continue
+		}
+
+		// Lines starting with ">" — treat as quoted regardless of inQuote
+		if strings.HasPrefix(trimmed, ">") {
+			inner := strings.TrimPrefix(trimmed, ">")
+			inner = strings.TrimPrefix(inner, " ")
+			for _, w := range wrapLine(inner, maxW) {
+				result.WriteString(quoteMarker + w + "\n")
+			}
+			continue
+		}
+
+		if inQuote {
+			// Re-wrap to maxW and tag
+			for _, w := range wrapLine(line, maxW) {
+				result.WriteString(quoteMarker + w + "\n")
+			}
+			continue
+		}
+
+		result.WriteString(line + "\n")
+	}
+	return result.String()
+}
+
+// wrapLine word-wraps a single line to maxWidth, preserving leading whitespace.
+func wrapLine(line string, maxWidth int) []string {
+	if rw.StringWidth(line) <= maxWidth {
+		return []string{line}
+	}
+	words := strings.Fields(line)
+	if len(words) == 0 {
+		return []string{line}
+	}
+	var lines []string
+	var cur strings.Builder
+	col := 0
+	for j, word := range words {
+		ww := rw.StringWidth(word)
+		// Account for the space that will be added before this word
+		needed := ww
+		if col > 0 {
+			needed++ // space separator
+		}
+		if needed+col > maxWidth && col > 0 {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			col = 0
+		}
+		if j > 0 && col > 0 {
+			cur.WriteString(" ")
+			col++
+		}
+		cur.WriteString(word)
+		col += ww
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, cur.String())
+	}
+	if len(lines) == 0 {
+		return []string{line}
+	}
+	return lines
+}
+
 // renderPlainEmail applies minimal ANSI styling to plain text email body.
 // Colors link references [N: ...] and email addresses, bolds headings.
-func renderPlainEmail(body string) string {
+// Adds │ border to lines tagged with quoteMarker by rewrapQuotedSections.
+// All wrapping is done upstream — this function only styles.
+func renderPlainEmail(body string, width int) string {
 	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Bold(true) // sky blue
-	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))              // green
+	mailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))            // green
 	headingStyle := lipgloss.NewStyle().Bold(true)
+	qhTextStyle := lipgloss.NewStyle().Foreground(common.Muted).Underline(true)
+	qhEmailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Underline(true)
+	quoteBorder := lipgloss.NewStyle().Foreground(common.Secondary).Render("│")
 
 	var result strings.Builder
 	for _, line := range strings.Split(body, "\n") {
+		// Quote header (tagged by rewrapQuotedSections)
+		if strings.HasPrefix(line, quoteHeaderPrefix) {
+			text := line[len(quoteHeaderPrefix):]
+			result.WriteString(styleLineParts(text, qhTextStyle, qhEmailStyle) + "\n")
+			continue
+		}
+		// Quoted line (tagged by rewrapQuotedSections)
+		if strings.HasPrefix(line, quoteMarker) {
+			text := line[len(quoteMarker):]
+			result.WriteString(quoteBorder + " " + styleLine(text, linkStyle, mailStyle) + "\n")
+			continue
+		}
 		// Bold headings (tagged with headingMarker by stripHTML)
 		if strings.HasPrefix(line, headingMarker) {
 			result.WriteString(headingStyle.Render(strings.TrimPrefix(line, headingMarker)) + "\n")
 			continue
 		}
-		// Colorize [N: ...] link references
-		styled := linkRefRegex.ReplaceAllStringFunc(line, func(match string) string {
-			return linkStyle.Render(match)
-		})
-		// Colorize email addresses
-		styled = emailRegex.ReplaceAllStringFunc(styled, func(match string) string {
-			return mailStyle.Render(match)
-		})
-		result.WriteString(styled + "\n")
+		// Normal line
+		result.WriteString(styleLine(line, linkStyle, mailStyle) + "\n")
 	}
 	return result.String()
+}
+
+// clampLineWidths ensures every line in the rendered content is at most maxWidth
+// visual characters wide. Uses ANSI-aware truncation so escape codes are preserved.
+func clampLineWidths(content string, maxWidth int) string {
+	lines := strings.Split(content, "\n")
+	var b strings.Builder
+	b.Grow(len(content))
+	for i, line := range lines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		if lipgloss.Width(line) > maxWidth {
+			b.WriteString(ansi.Truncate(line, maxWidth, ""))
+		} else {
+			b.WriteString(line)
+		}
+	}
+	return b.String()
+}
+
+// styleLineParts styles a line with different styles for email addresses vs surrounding text.
+// Avoids nested ANSI codes by styling each segment independently.
+func styleLineParts(line string, textStyle, emailStyle lipgloss.Style) string {
+	indices := emailRegex.FindAllStringIndex(line, -1)
+	if len(indices) == 0 {
+		return textStyle.Render(line)
+	}
+	var b strings.Builder
+	pos := 0
+	for _, idx := range indices {
+		if idx[0] > pos {
+			b.WriteString(textStyle.Render(line[pos:idx[0]]))
+		}
+		b.WriteString(emailStyle.Render(line[idx[0]:idx[1]]))
+		pos = idx[1]
+	}
+	if pos < len(line) {
+		b.WriteString(textStyle.Render(line[pos:]))
+	}
+	return b.String()
+}
+
+// styleLine colorizes link references and email addresses in a line.
+func styleLine(line string, linkStyle, mailStyle lipgloss.Style) string {
+	styled := linkRefRegex.ReplaceAllStringFunc(line, func(match string) string {
+		return linkStyle.Render(match)
+	})
+	styled = emailRegex.ReplaceAllStringFunc(styled, func(match string) string {
+		return mailStyle.Render(match)
+	})
+	return styled
 }
 
 var linkRefRegex = regexp.MustCompile(`\[\d+\] [^\s]+`)
@@ -526,8 +719,14 @@ func isImage(mimeType string) bool {
 func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		oldWidth := m.width
 		m.width = msg.Width
 		m.height = msg.Height
+		if m.renderedContent != "" && m.width != oldWidth {
+			// Width changed — re-render body at new width
+			m.initViewport("  Reflowing content...")
+			return m, m.renderBody()
+		}
 		m.initViewport(m.renderedContent)
 
 	case bodyRenderedMsg:
@@ -685,7 +884,7 @@ func (m Model) View() string {
 			tabContent += strings.Repeat(" ", gap) + acctLabel
 		}
 	}
-	b.WriteString(common.TabBar.Width(m.width).Render(tabContent) + "\n")
+	b.WriteString(common.TabBar.Width(m.width - 1).Render(tabContent) + "\n")
 
 	// Header block — truncate values to terminal width to prevent line wrapping
 	maxValW := m.width - 10 // "Subject: " is 9 chars + margin
@@ -713,10 +912,10 @@ func (m Model) View() string {
 		}
 	}
 
-	b.WriteString(strings.Repeat("─", m.width) + "\n")
+	b.WriteString(strings.Repeat("─", m.width-1) + "\n")
 
 	// Scrollable body
-	b.WriteString(m.viewport.View())
+	b.WriteString(m.viewport.View() + "\n")
 
 	// Status bar
 	status := " esc=back  r=reply  f=forward  d=trash  P=browser  j/k=scroll  K=keys  q=quit"
@@ -740,7 +939,7 @@ func (m Model) View() string {
 		status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 	}
 	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
-	b.WriteString(common.StatusBar.Width(m.width).Render(status))
+	b.WriteString(common.StatusBar.Width(m.width - 1).Render(status))
 
 	return b.String()
 }
@@ -821,19 +1020,27 @@ func compactURL(rawURL string, maxLen int) string {
 }
 
 
-// wrapText wraps lines at maxWidth on word boundaries, but leaves URLs
-// and table lines intact. Uses display width for proper Unicode handling.
+// wrapText wraps lines at maxWidth on word boundaries. Lines starting
+// with ">" are skipped (handled by rewrapQuotedSections). Bare URL lines
+// are skipped (cannot break a URL). All other lines are wrapped to maxWidth.
 func wrapText(text string, maxWidth int) string {
 	var result strings.Builder
 	for _, line := range strings.Split(text, "\n") {
-		// Don't wrap lines that are URLs, tables, or start with whitespace (code/quotes)
 		trimmed := strings.TrimSpace(line)
+		// Skip bare URL lines (cannot break a URL) and >-quoted lines
+		// (rewrapQuotedSections handles these)
 		if strings.HasPrefix(trimmed, "http://") || strings.HasPrefix(trimmed, "https://") ||
-			strings.HasPrefix(trimmed, "mailto:") || strings.HasPrefix(trimmed, "|") ||
-			strings.HasPrefix(line, " ") ||
-			strings.HasPrefix(line, "\t") || strings.HasPrefix(line, ">") {
+			strings.HasPrefix(trimmed, "mailto:") || strings.HasPrefix(line, ">") {
 			result.WriteString(line + "\n")
 			continue
+		}
+		// Lines starting with | (tables), space, or tab: skip only if they fit
+		if strings.HasPrefix(trimmed, "|") || strings.HasPrefix(line, " ") || strings.HasPrefix(line, "\t") {
+			if rw.StringWidth(line) <= maxWidth {
+				result.WriteString(line + "\n")
+				continue
+			}
+			// Too wide — fall through to word-wrap
 		}
 		if rw.StringWidth(line) <= maxWidth {
 			result.WriteString(line + "\n")
@@ -844,12 +1051,18 @@ func wrapText(text string, maxWidth int) string {
 		col := 0
 		for i, word := range words {
 			wordLen := rw.StringWidth(word)
+			// Account for the space that will be added before this word
+			needed := wordLen
+			if col > 0 {
+				needed++ // space separator
+			}
 			// Never break a URL even if it exceeds maxWidth
 			isURL := strings.HasPrefix(word, "http://") || strings.HasPrefix(word, "https://")
-			if col+wordLen > maxWidth && col > 0 && !isURL {
+			if needed+col > maxWidth && col > 0 && !isURL {
 				result.WriteString("\n")
 				col = 0
-			} else if i > 0 && col > 0 {
+			}
+			if i > 0 && col > 0 {
 				result.WriteString(" ")
 				col++
 			}

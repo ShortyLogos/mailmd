@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 
 	gapi "google.golang.org/api/gmail/v1"
 	"google.golang.org/api/option"
@@ -73,46 +74,41 @@ func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query st
 		return nil, err
 	}
 
-	// Fetch message metadata concurrently
-	type result struct {
-		idx     int
-		summary MessageSummary
-		err     error
-	}
+	// Fetch message metadata concurrently (throttled to avoid rate limits)
+	const maxConcurrent = 10
+	sem := make(chan struct{}, maxConcurrent)
 
-	results := make(chan result, len(resp.Messages))
+	messages := make([]MessageSummary, len(resp.Messages))
+	var wg sync.WaitGroup
 	for i, m := range resp.Messages {
+		wg.Add(1)
 		go func(idx int, id string) {
+			defer wg.Done()
+			sem <- struct{}{}        // acquire
+			defer func() { <-sem }() // release
+
 			msg, err := c.svc.Users.Messages.Get(c.user, id).
 				Format("metadata").
 				MetadataHeaders("From", "Subject", "Date").
 				Context(ctx).
 				Do()
 			if err != nil {
-				results <- result{idx: idx, err: err}
+				// Retry once on transient failure
+				msg, err = c.svc.Users.Messages.Get(c.user, id).
+					Format("metadata").
+					MetadataHeaders("From", "Subject", "Date").
+					Context(ctx).
+					Do()
+			}
+			if err != nil {
+				// Use minimal placeholder so message count stays consistent
+				messages[idx] = MessageSummary{ID: id, Subject: "(failed to load)"}
 				return
 			}
-			results <- result{idx: idx, summary: parseMessageSummary(msg)}
+			messages[idx] = parseMessageSummary(msg)
 		}(i, m.Id)
 	}
-
-	// Collect results in original order
-	ordered := make([]MessageSummary, len(resp.Messages))
-	valid := make([]bool, len(resp.Messages))
-	for range resp.Messages {
-		r := <-results
-		if r.err == nil {
-			ordered[r.idx] = r.summary
-			valid[r.idx] = true
-		}
-	}
-
-	messages := make([]MessageSummary, 0, len(resp.Messages))
-	for i, s := range ordered {
-		if valid[i] {
-			messages = append(messages, s)
-		}
-	}
+	wg.Wait()
 
 	return &MessageList{Messages: messages, NextPageToken: resp.NextPageToken}, nil
 }
