@@ -741,6 +741,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 
+		case key.Matches(msg, common.Keys.Home):
+			fc.cursor = 0
+
+		case key.Matches(msg, common.Keys.End):
+			if len(fc.messages) > 0 {
+				fc.cursor = len(fc.messages) - 1
+			}
+			if cmd := m.maybePrefetch(fc); cmd != nil {
+				return m, cmd
+			}
+
 		case key.Matches(msg, common.Keys.NextTab):
 			m.tabIdx = (m.tabIdx + 1) % len(folders)
 			m.searchQuery = ""
