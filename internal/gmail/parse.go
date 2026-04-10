@@ -54,9 +54,11 @@ func hasAttachments(part *gapi.MessagePart) bool {
 		return false
 	}
 	// Check for real attachment parts — skip small inline images (tracking pixels, signature logos)
+	// and calendar invitations (.ics files)
 	if part.Filename != "" && part.Body != nil && part.Body.AttachmentId != "" {
-		disposition := getHeader(part.Headers, "Content-Disposition")
-		if strings.HasPrefix(disposition, "inline") && part.Body.Size < 50*1024 {
+		if strings.HasSuffix(strings.ToLower(part.Filename), ".ics") || part.MimeType == "text/calendar" || part.MimeType == "application/ics" {
+			// Calendar invitation — skip
+		} else if strings.HasPrefix(getHeader(part.Headers, "Content-Disposition"), "inline") && part.Body.Size < 50*1024 {
 			// Small inline image — likely a tracking pixel or signature logo, skip
 		} else {
 			return true
