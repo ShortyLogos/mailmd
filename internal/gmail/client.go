@@ -271,9 +271,7 @@ func (c *gmailClient) CheckAttachments(ctx context.Context, ids []string) (map[s
 	out := make(map[string]bool, len(ids))
 	for range ids {
 		r := <-ch
-		if r.has {
-			out[r.id] = true
-		}
+		out[r.id] = r.has
 	}
 	return out, nil
 }
