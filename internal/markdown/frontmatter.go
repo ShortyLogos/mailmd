@@ -79,6 +79,16 @@ func ReplyTemplate(to, subject, quotedBody string) string {
 	return b.String()
 }
 
+func DraftTemplate(to, subject, body string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	b.WriteString("to: " + to + "\n")
+	b.WriteString("subject: " + subject + "\n")
+	b.WriteString("---\n\n")
+	b.WriteString(body)
+	return b.String()
+}
+
 func ForwardTemplate(subject, originalBody, originalFrom string) string {
 	var b strings.Builder
 	b.WriteString("---\n")

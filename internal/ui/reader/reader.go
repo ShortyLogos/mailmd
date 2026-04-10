@@ -881,6 +881,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
 			}
 
+		case key.Matches(msg, common.Keys.Edit):
+			// Edit draft from reader
+			if m.message != nil && m.tabIdx == 1 { // 1 = Drafts
+				id := m.message.ID
+				return m, func() tea.Msg { return common.EditDraftMsg{ID: id} }
+			}
+
 		case key.Matches(msg, common.Keys.Trash):
 			if m.message != nil {
 				id := m.message.ID
@@ -1013,7 +1020,11 @@ func (m Model) View() string {
 		if len(m.message.Attachments) > 0 {
 			extras += "  N+enter=attach  I=images"
 		}
-		status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
+		if m.tabIdx == 1 { // Drafts
+			status = " esc=back  e=edit  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
+		} else {
+			status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
+		}
 	}
 	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
 	b.WriteString(common.StatusBar.Width(m.width - 1).Render(status))

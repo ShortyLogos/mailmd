@@ -102,7 +102,8 @@ type Model struct {
 	err           string
 	status        string
 	statusLoading bool                 // true to show spinner next to status
-	showPreview   bool
+	showPreview     bool
+	attachmentCache map[string]bool // message ID → has attachments (persists across polls)
 	AccountName   string               // current account display name (shown in tab bar)
 	AccountEmail  string               // current account email (shown in tab bar)
 
@@ -128,12 +129,13 @@ func New(ctx context.Context, client gmail.Client) Model {
 	ti.CharLimit = 256
 
 	return Model{
-		ctx:         ctx,
-		client:      client,
-		cache:       make(map[int]*folderCache),
-		searchInput: ti,
-		syncing:     true, // first load
-		spinner:     spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
+		ctx:             ctx,
+		client:          client,
+		cache:           make(map[int]*folderCache),
+		attachmentCache: make(map[string]bool),
+		searchInput:     ti,
+		syncing:         true, // first load
+		spinner:         spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
 	}
 }
 
@@ -193,7 +195,7 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) pollTick() tea.Cmd {
-	return tea.Tick(2*time.Minute, func(time.Time) tea.Msg {
+	return tea.Tick(20*time.Second, func(time.Time) tea.Msg {
 		return pollTickMsg{}
 	})
 }
@@ -264,13 +266,19 @@ func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
 	}
 }
 
-func (m Model) enrichAttachments(msgs []gmail.MessageSummary, tabIdx int) tea.Cmd {
-	ids := make([]string, len(msgs))
-	for i, msg := range msgs {
-		ids[i] = msg.ID
+func (m *Model) enrichAttachments(msgs []gmail.MessageSummary, tabIdx int) tea.Cmd {
+	// Filter out messages we've already checked — only fetch uncached ones
+	var uncheckedIDs []string
+	for _, msg := range msgs {
+		if _, ok := m.attachmentCache[msg.ID]; !ok {
+			uncheckedIDs = append(uncheckedIDs, msg.ID)
+		}
+	}
+	if len(uncheckedIDs) == 0 {
+		return nil // all cached, nothing to fetch
 	}
 	return func() tea.Msg {
-		result, _ := m.client.CheckAttachments(m.ctx, ids)
+		result, _ := m.client.CheckAttachments(m.ctx, uncheckedIDs)
 		return attachmentEnrichMsg{attachments: result, tabIdx: tabIdx}
 	}
 }
@@ -422,6 +430,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.searchCache.cursor = 0
 				m.searchCache.loadingMore = false
 				m.err = ""
+				// Apply cached attachment status immediately
+				for i := range m.searchCache.messages {
+					if has, ok := m.attachmentCache[m.searchCache.messages[i].ID]; ok {
+						m.searchCache.messages[i].HasAttachments = has
+					}
+				}
 			}
 			m.syncing = false
 			if msg.err == nil && len(msg.messages) > 0 {
@@ -450,6 +464,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			target.messages = msg.messages
 			target.nextPageToken = msg.nextPageToken
 			target.loadingMore = false
+			// Apply cached attachment status immediately to prevent flicker
+			for i := range target.messages {
+				if has, ok := m.attachmentCache[target.messages[i].ID]; ok {
+					target.messages[i].HasAttachments = has
+				}
+			}
 			if len(target.messages) > target.highWaterMark {
 				target.highWaterMark = len(target.messages)
 			}
@@ -509,6 +529,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case attachmentEnrichMsg:
+		// Store results in persistent cache
+		for id, has := range msg.attachments {
+			m.attachmentCache[id] = has
+		}
 		if msg.tabIdx == -1 {
 			if m.searchCache != nil {
 				for i := range m.searchCache.messages {
@@ -578,6 +602,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 	case common.StatusMsg:
 		m.status = msg.Text
+		m.statusLoading = false
 
 	case spinner.TickMsg:
 		// Always keep the spinner ticking so it animates immediately
@@ -716,16 +741,6 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, cmd
 			}
 
-		case key.Matches(msg, key.NewBinding(key.WithKeys("left"))):
-			// Left arrow = previous folder in inbox view
-			m.tabIdx = (m.tabIdx - 1 + len(folders)) % len(folders)
-			m.searchQuery = ""
-			m.searchCache = nil
-			m.searching = false
-			m.syncing = true
-			m.err = ""
-			return m, m.fetchMessages()
-
 		case key.Matches(msg, common.Keys.NextTab):
 			m.tabIdx = (m.tabIdx + 1) % len(folders)
 			m.searchQuery = ""
@@ -767,6 +782,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
 				id := fc.messages[fc.cursor].ID
 				return m, func() tea.Msg { return common.FetchMessageMsg{ID: id} }
+			}
+
+		case key.Matches(msg, common.Keys.Edit):
+			// Edit draft from inbox
+			if m.currentLabelID() == "DRAFT" && len(fc.selected) == 0 && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				id := fc.messages[fc.cursor].ID
+				return m, func() tea.Msg { return common.EditDraftMsg{ID: id} }
 			}
 
 		case key.Matches(msg, common.Keys.Reply):
@@ -938,7 +960,11 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 	case "TRASH":
 		return base + "  u=restore" + markHint + suffix
 	case "DRAFT":
-		return base + "  d=trash" + markHint + suffix
+		extra := "  d=trash"
+		if noSel {
+			extra += "  e=edit"
+		}
+		return base + extra + markHint + suffix
 	case "SENT":
 		extra := "  d=trash"
 		if noSel {

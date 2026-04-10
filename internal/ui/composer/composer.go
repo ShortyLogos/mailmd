@@ -44,6 +44,7 @@ type Model struct {
 	err      string
 	status   string
 	tmpFile  string
+	draftID  string // if editing a draft, the original message ID to trash after send
 }
 
 // New creates a new composer model.
@@ -57,6 +58,13 @@ func New(ctx context.Context, client gmail.Client, editor, template string, widt
 		width:    width,
 		height:   height,
 	}
+}
+
+// NewDraftEdit creates a composer for editing an existing draft.
+func NewDraftEdit(ctx context.Context, client gmail.Client, editor, template string, width, height int, draftID string) Model {
+	m := New(ctx, client, editor, template, width, height)
+	m.draftID = draftID
+	return m
 }
 
 // Init launches the editor immediately.
@@ -200,6 +208,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 func (m Model) sendMessage() tea.Cmd {
 	data := m.data
+	draftID := m.draftID
 	return func() tea.Msg {
 		htmlBody, err := markdown.Convert(data.Body)
 		if err != nil {
@@ -208,6 +217,10 @@ func (m Model) sendMessage() tea.Cmd {
 		plainBody := markdown.ConvertPlain(data.Body)
 		if err := m.client.SendMessage(m.ctx, data.To, data.Subject, htmlBody, plainBody); err != nil {
 			return common.SendResultMsg{Err: fmt.Errorf("send failed: %w", err)}
+		}
+		// Trash the original draft after successful send
+		if draftID != "" {
+			m.client.TrashMessage(m.ctx, draftID)
 		}
 		return common.SendResultMsg{Err: nil}
 	}

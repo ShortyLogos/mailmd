@@ -27,3 +27,6 @@ type FetchAndReplyMsg struct{ ID string }
 
 // TrashFromReaderMsg is sent when the user trashes/deletes a message from the reader view.
 type TrashFromReaderMsg struct{ ID string }
+
+// EditDraftMsg is sent when the user wants to edit a draft message.
+type EditDraftMsg struct{ ID string }

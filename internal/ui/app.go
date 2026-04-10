@@ -53,6 +53,11 @@ type fetchReplyResultMsg struct {
 	err error
 }
 
+type fetchDraftResultMsg struct {
+	msg *gmail.Message
+	err error
+}
+
 type authResultMsg struct {
 	client gmail.Client
 	email  string
@@ -258,6 +263,36 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.active.msgCache[msg.msg.ID] = msg.msg
 		tmpl := markdown.ReplyTemplate(msg.msg.From, "Re: "+msg.msg.Subject, msg.msg.Body)
 		a.composer = composer.New(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height)
+		a.screen = screenCompose
+		return a, a.composer.Init()
+
+	case common.EditDraftMsg:
+		id := msg.ID
+		if cached, ok := a.active.msgCache[id]; ok {
+			tmpl := markdown.DraftTemplate(cached.To, cached.Subject, cached.Body)
+			a.composer = composer.NewDraftEdit(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height, id)
+			a.screen = screenCompose
+			return a, a.composer.Init()
+		}
+		a.active.inbox.SetLoadingStatus("Opening draft...")
+		a.loading = true
+		return a, tea.Batch(
+			func() tea.Msg {
+				full, err := a.active.client.GetMessage(a.ctx, id)
+				return fetchDraftResultMsg{msg: full, err: err}
+			},
+			a.active.inbox.SpinnerTick(),
+		)
+
+	case fetchDraftResultMsg:
+		a.loading = false
+		if msg.err != nil {
+			a.active.inbox.SetStatus(fmt.Sprintf("Error: %v", msg.err))
+			return a, nil
+		}
+		a.active.msgCache[msg.msg.ID] = msg.msg
+		tmpl := markdown.DraftTemplate(msg.msg.To, msg.msg.Subject, msg.msg.Body)
+		a.composer = composer.NewDraftEdit(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height, msg.msg.ID)
 		a.screen = screenCompose
 		return a, a.composer.Init()
 
@@ -660,12 +695,12 @@ func (a App) renderHelpOverlay(base string) string {
 		lines = append(lines, bind("N + enter", "Jump to message N"))
 		lines = append(lines, bind("tab", "Next folder"))
 		lines = append(lines, bind("shift+tab", "Previous folder"))
-		lines = append(lines, bind("h / ←", "Previous folder"))
+		lines = append(lines, bind("d", "Trash / delete message"))
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("  Actions"))
 		lines = append(lines, bind("c", "Compose new email"))
 		lines = append(lines, bind("r", "Reply to message"))
-		lines = append(lines, bind("d", "Trash / delete message"))
+		lines = append(lines, bind("e", "Edit draft (in Drafts)"))
 		lines = append(lines, bind("b", "Block sender (auto-trash)"))
 		lines = append(lines, bind("m", "Toggle read / unread"))
 		lines = append(lines, bind("u", "Restore from trash"))
