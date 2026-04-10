@@ -87,6 +87,7 @@ type folderCache struct {
 	selected      map[string]bool // message ID → selected
 	nextPageToken string          // for loading more messages
 	loadingMore   bool            // true while fetching next page
+	highWaterMark int             // max messages ever loaded this session (for re-fetch sizing)
 }
 
 // Model is the inbox Bubble Tea model.
@@ -201,8 +202,13 @@ func (m Model) fetchMessages() tea.Cmd {
 	tabIdx := m.tabIdx
 	labelID := folders[tabIdx].labelID
 	query := ""
+	// Use the high-water mark so re-fetches don't shrink a list the user has scrolled through
+	var maxResults int64
+	if c := m.cache[tabIdx]; c != nil && c.highWaterMark > 50 {
+		maxResults = int64(c.highWaterMark)
+	}
 	return func() tea.Msg {
-		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
+		list, err := m.client.ListMessages(m.ctx, labelID, query, "", maxResults)
 		if err != nil {
 			return messagesLoadedMsg{err: err, tabIdx: tabIdx}
 		}
@@ -444,6 +450,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			target.messages = msg.messages
 			target.nextPageToken = msg.nextPageToken
 			target.loadingMore = false
+			if len(target.messages) > target.highWaterMark {
+				target.highWaterMark = len(target.messages)
+			}
 			if prevID != "" {
 				for i, m := range target.messages {
 					if m.ID == prevID {
@@ -492,6 +501,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		target.messages = append(target.messages, msg.messages...)
 		target.nextPageToken = msg.nextPageToken
+		if len(target.messages) > target.highWaterMark {
+			target.highWaterMark = len(target.messages)
+		}
 		if len(msg.messages) > 0 {
 			return m, m.enrichAttachments(msg.messages, msg.tabIdx)
 		}
@@ -517,31 +529,33 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case trashDoneMsg:
 		if msg.err != nil {
 			m.status = "Error: " + msg.err.Error()
+			// Re-fetch to restore correct state since optimistic removal was wrong
+			m.syncing = true
+			return m, m.fetchMessages()
 		} else if msg.count > 1 {
 			m.status = fmt.Sprintf("%d messages trashed.", msg.count)
 		} else {
 			m.status = "Message trashed."
 		}
-		m.syncing = true
-		return m, m.fetchMessages()
+		// Success: trust the optimistic removal, no re-fetch needed
 
 	case deleteDoneMsg:
 		if msg.err != nil {
 			m.status = "Error: " + msg.err.Error()
-		} else {
-			m.status = "Message permanently deleted."
+			m.syncing = true
+			return m, m.fetchMessages()
 		}
-		m.syncing = true
-		return m, m.fetchMessages()
+		m.status = "Message permanently deleted."
 
 	case restoreDoneMsg:
 		if msg.err != nil {
 			m.status = "Error: " + msg.err.Error()
-		} else {
-			m.status = "Message restored to Inbox."
+			m.syncing = true
+			return m, m.fetchMessages()
 		}
-		m.syncing = true
-		return m, m.fetchMessages()
+		m.status = "Message restored to Inbox."
+		// Invalidate the Inbox tab cache so it refreshes when the user switches to it
+		delete(m.cache, 0)
 
 	case toggleReadDoneMsg:
 		if msg.err != nil {

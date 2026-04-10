@@ -15,7 +15,7 @@ import (
 // Client is the Gmail API client interface.
 type Client interface {
 	ListLabels(ctx context.Context) ([]Label, error)
-	ListMessages(ctx context.Context, labelID string, query string, pageToken string) (*MessageList, error)
+	ListMessages(ctx context.Context, labelID string, query string, pageToken string, maxResults ...int64) (*MessageList, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
 	SendMessage(ctx context.Context, to, subject, htmlBody, plainBody string) error
 	ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error
@@ -61,8 +61,12 @@ func (c *gmailClient) ListLabels(ctx context.Context) ([]Label, error) {
 	return labels, nil
 }
 
-func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query string, pageToken string) (*MessageList, error) {
-	req := c.svc.Users.Messages.List(c.user).LabelIds(labelID).MaxResults(50).Context(ctx)
+func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query string, pageToken string, maxResults ...int64) (*MessageList, error) {
+	n := int64(50)
+	if len(maxResults) > 0 && maxResults[0] > 0 {
+		n = maxResults[0]
+	}
+	req := c.svc.Users.Messages.List(c.user).LabelIds(labelID).MaxResults(n).Context(ctx)
 	if query != "" {
 		req = req.Q(query)
 	}
