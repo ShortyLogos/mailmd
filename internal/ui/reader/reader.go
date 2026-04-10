@@ -168,13 +168,27 @@ const quoteMarker = "\x1c"
 // quoteHeaderPrefix tags the "On ... wrote:" line.
 const quoteHeaderPrefix = "\x1c\x1e"
 
-// rewrapQuotedSections detects "On X, Y wrote:" headers, re-wraps all
-// subsequent lines to width-2 (to make room for the │ border), and
-// prefixes them with quoteMarker so the renderer can style them.
+// fwdFieldMarker tags forwarded header field lines (From:, Sent:, To:, etc.)
+const fwdFieldMarker = "\x1c\x1d"
+
+// fwdSepMarker tags the separator line injected before a forwarded header block.
+const fwdSepMarker = "\x1c\x1a"
+
+// fwdAnchorRegex matches the first line of a forwarded-header block (From:/De:/Von:).
+var fwdAnchorRegex = regexp.MustCompile(`(?i)^(From|De|Von|Da|Van)\s*:`)
+
+// fwdFieldRegex matches any forwarded-header field line.
+var fwdFieldRegex = regexp.MustCompile(
+	`(?i)^(From|De|Von|Da|Van|Sent|Date|Envoy[eéè]|Gesendet|Datum|Verzonden|To|[ÀA]|An|Cc|Bcc|Subject|Objet|Betreff|Onderwerp)\s*:`)
+
+// rewrapQuotedSections detects "On X, Y wrote:" headers and forwarded
+// header blocks (From:/De:, Sent:/Envoyé:, etc.), re-wraps subsequent
+// lines to width-2 (for the │ border), and tags them with markers.
 func rewrapQuotedSections(body string, width int) string {
 	lines := strings.Split(body, "\n")
 	var result strings.Builder
 	inQuote := false
+	inFwdHeader := false
 	maxW := width - 2
 	if maxW < 1 {
 		maxW = 1
@@ -183,17 +197,61 @@ func rewrapQuotedSections(body string, width int) string {
 	for i, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
+		// "On X, Y wrote:" — classic thread header
 		if quoteHeaderRegex.MatchString(trimmed) {
 			inQuote = true
-			// Blank line above header if previous line isn't blank
+			inFwdHeader = false
 			if i > 0 && strings.TrimSpace(lines[i-1]) != "" {
 				result.WriteString("\n")
 			}
-			// Wrap and tag the header line
 			for _, w := range wrapLine(line, width) {
 				result.WriteString(quoteHeaderPrefix + w + "\n")
 			}
 			continue
+		}
+
+		// Forwarded header block detection: From:/De: followed by Sent:/Date:/Envoyé:
+		if !inFwdHeader && fwdAnchorRegex.MatchString(trimmed) {
+			confirmed := false
+			for j := i + 1; j < len(lines) && j <= i+2; j++ {
+				nxt := strings.TrimSpace(lines[j])
+				if nxt == "" {
+					continue
+				}
+				if fwdFieldRegex.MatchString(nxt) {
+					confirmed = true
+				}
+				break
+			}
+			if confirmed {
+				inFwdHeader = true
+				inQuote = true
+				if i > 0 && strings.TrimSpace(lines[i-1]) != "" {
+					result.WriteString("\n")
+				}
+				result.WriteString(fwdSepMarker + "\n")
+				for _, w := range wrapLine(trimmed, maxW) {
+					result.WriteString(fwdFieldMarker + w + "\n")
+				}
+				continue
+			}
+		}
+
+		// Inside forwarded header block — tag field lines
+		if inFwdHeader {
+			if trimmed == "" {
+				// Skip blank lines between header fields to keep it compact
+				continue
+			}
+			if fwdFieldRegex.MatchString(trimmed) {
+				for _, w := range wrapLine(trimmed, maxW) {
+					result.WriteString(fwdFieldMarker + w + "\n")
+				}
+				continue
+			}
+			// Non-field line — end of header block, process as quoted body
+			inFwdHeader = false
+			// Fall through to inQuote handling below
 		}
 
 		// Lines starting with ">" — treat as quoted regardless of inQuote
@@ -207,7 +265,6 @@ func rewrapQuotedSections(body string, width int) string {
 		}
 
 		if inQuote {
-			// Re-wrap to maxW and tag
 			for _, w := range wrapLine(line, maxW) {
 				result.WriteString(quoteMarker + w + "\n")
 			}
@@ -262,6 +319,7 @@ func wrapLine(line string, maxWidth int) []string {
 // renderPlainEmail applies minimal ANSI styling to plain text email body.
 // Colors link references [N: ...] and email addresses, bolds headings.
 // Adds │ border to lines tagged with quoteMarker by rewrapQuotedSections.
+// Renders forwarded header blocks with separator + muted styling.
 // All wrapping is done upstream — this function only styles.
 func renderPlainEmail(body string, width int) string {
 	linkStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#38BDF8")).Bold(true) // sky blue
@@ -270,10 +328,29 @@ func renderPlainEmail(body string, width int) string {
 	qhTextStyle := lipgloss.NewStyle().Foreground(common.Muted).Underline(true)
 	qhEmailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981")).Underline(true)
 	quoteBorder := lipgloss.NewStyle().Foreground(common.Secondary).Render("│")
+	// Forwarded header: muted text with green emails (consistent with "On...wrote:")
+	fwdTextStyle := lipgloss.NewStyle().Foreground(common.Muted)
+	fwdEmailStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#10B981"))
+	fwdSepStyle := lipgloss.NewStyle().Foreground(common.Secondary)
 
 	var result strings.Builder
 	for _, line := range strings.Split(body, "\n") {
-		// Quote header (tagged by rewrapQuotedSections)
+		// Forwarded separator (check before quoteMarker — shares \x1c prefix)
+		if strings.HasPrefix(line, fwdSepMarker) {
+			sepW := width - 2
+			if sepW < 1 {
+				sepW = 1
+			}
+			result.WriteString(fwdSepStyle.Render(strings.Repeat("─", sepW)) + "\n")
+			continue
+		}
+		// Forwarded header field line (check before quoteMarker — shares \x1c prefix)
+		if strings.HasPrefix(line, fwdFieldMarker) {
+			text := line[len(fwdFieldMarker):]
+			result.WriteString(quoteBorder + " " + styleLineParts(text, fwdTextStyle, fwdEmailStyle) + "\n")
+			continue
+		}
+		// Quote header "On ... wrote:" (tagged by rewrapQuotedSections)
 		if strings.HasPrefix(line, quoteHeaderPrefix) {
 			text := line[len(quoteHeaderPrefix):]
 			result.WriteString(styleLineParts(text, qhTextStyle, qhEmailStyle) + "\n")
