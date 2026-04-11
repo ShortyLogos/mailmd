@@ -1,0 +1,1 @@
+- [cli-subcommands.md](cli-subcommands.md) — `compose`, `draft`, and `help` subcommands for scripting and LLM integration

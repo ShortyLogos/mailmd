@@ -1,0 +1,1 @@
+- [compose-dialog.md](compose-dialog.md) — Modal overlay pattern for collecting email metadata with autocomplete before editor launch

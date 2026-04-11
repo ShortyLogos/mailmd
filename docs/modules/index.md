@@ -1,0 +1,2 @@
+- [composer.md](composer.md) — Editing → preview → send lifecycle, metadata mode, undo-send
+- [contacts.md](contacts.md) — Per-account contact cache for compose autocomplete
