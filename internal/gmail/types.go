@@ -10,6 +10,7 @@ type Label struct {
 type MessageSummary struct {
 	ID             string
 	From           string
+	To             string
 	Subject        string
 	Snippet        string
 	Date           time.Time
@@ -32,8 +33,10 @@ type Attachment struct {
 type Message struct {
 	ID          string
 	ThreadID    string
+	MessageID   string // RFC 2822 Message-ID header (for In-Reply-To)
 	From        string
 	To          string
+	CC          string
 	Subject     string
 	Date        time.Time
 	Body        string

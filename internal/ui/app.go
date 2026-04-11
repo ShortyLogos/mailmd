@@ -6,13 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"net/mail"
+
 	"github.com/deric/mailmd/internal/auth"
 	"github.com/deric/mailmd/internal/config"
+	"github.com/deric/mailmd/internal/contacts"
 	"github.com/deric/mailmd/internal/gmail"
 	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
@@ -31,14 +35,15 @@ const (
 
 // AppOptions holds everything needed to create the app.
 type AppOptions struct {
-	Ctx          context.Context
-	Client       gmail.Client
-	Cfg          config.Config
-	CfgPath      string
-	ClientID     string
-	ClientSecret string
-	ConfigDir    string
-	ActiveEmail  string
+	Ctx            context.Context
+	Client         gmail.Client
+	Cfg            config.Config
+	CfgPath        string
+	ClientID       string
+	ClientSecret   string
+	ConfigDir      string
+	ActiveEmail    string
+	InitialCompose *common.ComposeMsg // if set, open compose dialog on startup
 }
 
 // --- Messages ---
@@ -98,8 +103,16 @@ type App struct {
 	composer composer.Model
 	loading  bool
 
+	// Startup
+	initialCompose *common.ComposeMsg
+
 	// Help overlay
 	showHelp bool
+
+	// Undo-send
+	pendingSend      *common.QueueSendMsg
+	undoCountdown    int // seconds remaining
+	pendingComposer  composer.Model // preserved for undo → re-open preview
 
 	// Account switcher
 	showSwitcher   bool
@@ -108,12 +121,56 @@ type App struct {
 	editingAccount bool
 	nameInput      textinput.Model
 	authPending    bool
+
+	// Compose dialog
+	showComposeDialog   bool
+	composeField        composeDialogField
+	composeTo           []string
+	composeCC           []string
+	composeAttachments  []gmail.AttachmentFile
+	composeToInput      textinput.Model
+	composeCCInput      textinput.Model
+	composeSubjectInput textinput.Model
+	composeAttInput     textinput.Model
+	composeSuggestions  []string
+	composeSuggCursor   int
+	composeThreadID     string
+	composeInReplyTo    string
+	composeBody         string
+	composeDraftID      string
+	composeTitle        string
+	contactCache        []string
 }
+
+type composeDialogField int
+
+const (
+	composeFieldTo composeDialogField = iota
+	composeFieldCC
+	composeFieldSubject
+	composeFieldAttachments
+)
 
 func New(opts AppOptions) App {
 	ti := textinput.New()
 	ti.Placeholder = "Account name (e.g. Work)"
 	ti.CharLimit = 64
+
+	toInput := textinput.New()
+	toInput.Placeholder = "Type email address..."
+	toInput.CharLimit = 256
+
+	ccInput := textinput.New()
+	ccInput.Placeholder = "Type email address..."
+	ccInput.CharLimit = 256
+
+	subjectInput := textinput.New()
+	subjectInput.Placeholder = "Subject..."
+	subjectInput.CharLimit = 256
+
+	attInput := textinput.New()
+	attInput.Placeholder = "File path (tab to skip)..."
+	attInput.CharLimit = 512
 
 	state := &accountState{
 		email:    opts.ActiveEmail,
@@ -134,22 +191,33 @@ func New(opts AppOptions) App {
 	states := map[string]*accountState{opts.ActiveEmail: state}
 
 	return App{
-		ctx:          opts.Ctx,
-		cfgPath:      opts.CfgPath,
-		cfg:          opts.Cfg,
-		clientID:     opts.ClientID,
-		clientSecret: opts.ClientSecret,
-		configDir:    opts.ConfigDir,
-		active:       state,
-		states:       states,
-		initted:      map[string]bool{opts.ActiveEmail: true},
-		screen:       screenInbox,
-		nameInput:    ti,
+		ctx:                 opts.Ctx,
+		cfgPath:             opts.CfgPath,
+		cfg:                 opts.Cfg,
+		clientID:            opts.ClientID,
+		clientSecret:        opts.ClientSecret,
+		configDir:           opts.ConfigDir,
+		active:              state,
+		states:              states,
+		initted:             map[string]bool{opts.ActiveEmail: true},
+		screen:              screenInbox,
+		nameInput:           ti,
+		composeToInput:      toInput,
+		composeCCInput:      ccInput,
+		composeSubjectInput: subjectInput,
+		composeAttInput:     attInput,
+		initialCompose:      opts.InitialCompose,
 	}
 }
 
 func (a App) Init() tea.Cmd {
-	return a.active.inbox.Init()
+	cmds := []tea.Cmd{a.active.inbox.Init()}
+	if a.initialCompose != nil {
+		msg := *a.initialCompose
+		a.initialCompose = nil
+		cmds = append(cmds, func() tea.Msg { return msg })
+	}
+	return tea.Batch(cmds...)
 }
 
 // activeAccountName returns the display name for the current account.
@@ -243,10 +311,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case common.FetchAndReplyMsg:
 		id := msg.ID
 		if cached, ok := a.active.msgCache[id]; ok {
-			tmpl := markdown.ReplyTemplate(cached.From, "Re: "+cached.Subject, cached.Body)
-			a.composer = composer.New(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height)
-			a.screen = screenCompose
-			return a, a.composer.Init()
+			cmd := a.openComposeDialog(
+				[]string{cached.From}, nil, "Re: "+cached.Subject,
+				quoteBodyText(cached.Body),
+				cached.ThreadID, cached.MessageID, "", "Reply", nil,
+			)
+			return a, cmd
 		}
 		a.loading = true
 		return a, func() tea.Msg {
@@ -261,18 +331,20 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.active.msgCache[msg.msg.ID] = msg.msg
-		tmpl := markdown.ReplyTemplate(msg.msg.From, "Re: "+msg.msg.Subject, msg.msg.Body)
-		a.composer = composer.New(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height)
-		a.screen = screenCompose
-		return a, a.composer.Init()
+		cmd := a.openComposeDialog(
+			[]string{msg.msg.From}, nil, "Re: "+msg.msg.Subject,
+			quoteBodyText(msg.msg.Body),
+			msg.msg.ThreadID, msg.msg.MessageID, "", "Reply", nil,
+		)
+		return a, cmd
 
 	case common.EditDraftMsg:
 		id := msg.ID
 		if cached, ok := a.active.msgCache[id]; ok {
-			tmpl := markdown.DraftTemplate(cached.To, cached.Subject, cached.Body)
-			a.composer = composer.NewDraftEdit(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height, id)
-			a.screen = screenCompose
-			return a, a.composer.Init()
+			to := splitAddresses(cached.To)
+			cc := splitAddresses(cached.CC)
+			cmd := a.openComposeDialog(to, cc, cached.Subject, cached.Body, "", "", id, "Edit Draft", nil)
+			return a, cmd
 		}
 		a.active.inbox.SetLoadingStatus("Opening draft...")
 		a.loading = true
@@ -291,10 +363,10 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 		a.active.msgCache[msg.msg.ID] = msg.msg
-		tmpl := markdown.DraftTemplate(msg.msg.To, msg.msg.Subject, msg.msg.Body)
-		a.composer = composer.NewDraftEdit(a.ctx, a.active.client, a.cfg.Editor(), tmpl, a.width, a.height, msg.msg.ID)
-		a.screen = screenCompose
-		return a, a.composer.Init()
+		to := splitAddresses(msg.msg.To)
+		cc := splitAddresses(msg.msg.CC)
+		cmd := a.openComposeDialog(to, cc, msg.msg.Subject, msg.msg.Body, "", "", msg.msg.ID, "Edit Draft", nil)
+		return a, cmd
 
 	case fetchMsgResultMsg:
 		a.loading = false
@@ -315,9 +387,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, a.reader.Init()
 
 	case common.ComposeMsg:
-		a.composer = composer.New(a.ctx, a.active.client, a.cfg.Editor(), msg.Template, a.width, a.height)
-		a.screen = screenCompose
-		return a, a.composer.Init()
+		title := msg.Title
+		if title == "" {
+			title = "Compose"
+		}
+		cmd := a.openComposeDialog(msg.To, msg.CC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, title, msg.Attachments)
+		return a, cmd
 
 	case common.TrashFromReaderMsg:
 		a.screen = screenInbox
@@ -344,10 +419,115 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return common.StatusMsg{Text: "Message trashed."}
 		})
 
+	case common.EditHeadersMsg:
+		a.screen = screenInbox
+		cmd := a.openComposeDialog(msg.To, msg.CC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, "Edit Headers", msg.Attachments)
+		return a, cmd
+
+	case common.SaveDraftMsg:
+		a.screen = screenInbox
+		a.active.inbox.SetStatus("Saving draft...")
+		// Persist recipient addresses to contacts cache
+		var addrs []string
+		if msg.To != "" {
+			addrs = append(addrs, strings.Split(msg.To, ",")...)
+		}
+		if msg.CC != "" {
+			addrs = append(addrs, strings.Split(msg.CC, ",")...)
+		}
+		if len(addrs) > 0 {
+			go contacts.Add(a.contactsPath(), addrs...)
+		}
+		client := a.active.client
+		ctx := a.ctx
+		return a, tea.Batch(
+			a.active.inbox.SpinnerTick(),
+			func() tea.Msg {
+				htmlBody, plainBody := "", msg.Body
+				if msg.Body != "" {
+					if html, err := markdown.Convert(msg.Body); err == nil {
+						htmlBody = html
+					}
+					plainBody = markdown.ConvertPlain(msg.Body)
+				}
+				err := client.CreateDraft(ctx, msg.To, msg.CC, msg.Subject, htmlBody, plainBody, msg.Attachments)
+				return common.DraftSavedMsg{Err: err}
+			},
+		)
+
+	case common.DraftSavedMsg:
+		if msg.Err != nil {
+			a.active.inbox.SetStatus(fmt.Sprintf("Draft save failed: %v", msg.Err))
+		} else {
+			a.active.inbox.SetStatus("Draft saved.")
+		}
+		return a, nil
+
 	case common.BackToInboxMsg:
 		a.screen = screenInbox
 		a.active.inbox.SetStatus("")
 		return a, a.active.inbox.SpinnerTick()
+
+	case common.QueueSendMsg:
+		a.screen = screenInbox
+		a.pendingSend = &msg
+		a.pendingComposer = a.composer
+		a.undoCountdown = 5
+		a.active.inbox.SetStatus(undoSendStatus(a.undoCountdown))
+		return a, tea.Tick(time.Second, func(time.Time) tea.Msg { return common.UndoSendTickMsg{} })
+
+	case common.UndoSendTickMsg:
+		if a.pendingSend == nil {
+			return a, nil
+		}
+		a.undoCountdown--
+		if a.undoCountdown <= 0 {
+			// Timer expired — send now
+			pending := a.pendingSend
+			a.pendingSend = nil
+			client := a.active.client
+			ctx := a.ctx
+			a.active.inbox.SetStatus("Sending...")
+			// Persist contacts
+			var addrs []string
+			if pending.To != "" {
+				addrs = append(addrs, strings.Split(pending.To, ",")...)
+			}
+			if pending.CC != "" {
+				addrs = append(addrs, strings.Split(pending.CC, ",")...)
+			}
+			if len(addrs) > 0 {
+				go contacts.Add(a.contactsPath(), addrs...)
+			}
+			return a, func() tea.Msg {
+				var err error
+				if pending.ThreadID != "" {
+					err = client.ReplyMessage(ctx, pending.ThreadID, pending.InReplyTo, pending.To, pending.CC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
+				} else {
+					err = client.SendMessage(ctx, pending.To, pending.CC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
+				}
+				if err != nil {
+					return common.SendResultMsg{Err: err}
+				}
+				if pending.DraftID != "" {
+					client.TrashMessage(ctx, pending.DraftID)
+				}
+				return common.SendResultMsg{Err: nil}
+			}
+		}
+		a.active.inbox.SetStatus(undoSendStatus(a.undoCountdown))
+		return a, tea.Tick(time.Second, func(time.Time) tea.Msg { return common.UndoSendTickMsg{} })
+
+	case common.UndoSendMsg:
+		if a.pendingSend == nil {
+			return a, nil
+		}
+		a.pendingSend = nil
+		// Re-open the composer in preview mode
+		a.composer = a.pendingComposer
+		a.screen = screenCompose
+		a.active.inbox.SetStatus("")
+		return a, nil
 
 	case common.SendResultMsg:
 		a.screen = screenInbox
@@ -366,8 +546,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, cmd
 	}
 
-	// --- Switcher key handling (intercept before screen delegation) ---
+	// --- Key interception (before screen delegation) ---
 	if kmsg, ok := msg.(tea.KeyMsg); ok {
+		// Undo-send: U cancels a pending send
+		if a.pendingSend != nil && a.screen == screenInbox && kmsg.String() == "U" {
+			return a.Update(common.UndoSendMsg{})
+		}
+
 		// Help overlay
 		if a.showHelp {
 			if kmsg.String() == "K" || kmsg.String() == "esc" || kmsg.String() == "q" {
@@ -380,6 +565,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, nil
 		}
 
+		if a.showComposeDialog {
+			return a.updateComposeDialog(kmsg)
+		}
 		if a.showSwitcher {
 			return a.updateSwitcher(kmsg)
 		}
@@ -663,6 +851,9 @@ func (a App) View() string {
 	if a.showHelp {
 		return a.renderHelpOverlay(base)
 	}
+	if a.showComposeDialog {
+		return a.renderComposeOverlay(base)
+	}
 	if a.showSwitcher {
 		return a.renderSwitcherOverlay(base)
 	}
@@ -838,4 +1029,631 @@ func padRight(s string, width int) string {
 		return s
 	}
 	return s + strings.Repeat(" ", width-w)
+}
+
+var undoSendStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#38BDF8")) // sky blue
+
+func undoSendStatus(seconds int) string {
+	return undoSendStyle.Render(fmt.Sprintf("Message queued — U to undo (%ds)", seconds))
+}
+
+func formatFileSize(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+}
+
+// --- Compose dialog helpers ---
+
+func quoteBodyText(body string) string {
+	var b strings.Builder
+	b.WriteString("\n")
+	for _, line := range strings.Split(body, "\n") {
+		b.WriteString("> " + line + "\n")
+	}
+	return b.String()
+}
+
+func splitAddresses(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
+// --- Compose dialog ---
+
+func (a *App) contactsPath() string {
+	// Per-account contacts file so suggestions don't leak between accounts
+	safe := strings.ReplaceAll(a.active.email, "/", "_")
+	return filepath.Join(a.configDir, "mailmd", "contacts-"+safe+".json")
+}
+
+func (a *App) openComposeDialog(to, cc []string, subject, body, threadID, inReplyTo, draftID, title string, attachments []gmail.AttachmentFile) tea.Cmd {
+	a.showComposeDialog = true
+	a.composeField = composeFieldTo
+	a.composeTo = to
+	a.composeCC = cc
+	a.composeAttachments = attachments
+	a.composeBody = body
+	a.composeThreadID = threadID
+	a.composeInReplyTo = inReplyTo
+	a.composeDraftID = draftID
+	a.composeTitle = title
+	a.composeSuggCursor = -1
+	a.composeSuggestions = nil
+
+	a.composeToInput.SetValue("")
+	a.composeToInput.Focus()
+	a.composeCCInput.SetValue("")
+	a.composeCCInput.Blur()
+	a.composeSubjectInput.SetValue(subject)
+	a.composeSubjectInput.Blur()
+	a.composeAttInput.SetValue("")
+	a.composeAttInput.Blur()
+
+	a.contactCache = a.buildContactCache()
+
+	return textinput.Blink
+}
+
+func (a *App) buildContactCache() []string {
+	seen := make(map[string]bool)
+	var result []string
+
+	// 1. Persistent contacts (sorted by most-recently-used)
+	for _, addr := range contacts.All(a.contactsPath()) {
+		email := extractEmail(addr)
+		key := strings.ToLower(email)
+		if key != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, addr)
+		}
+	}
+
+	// 2. In-memory addresses from inbox folder caches
+	for _, addr := range a.active.inbox.RecentAddresses() {
+		email := extractEmail(addr)
+		key := strings.ToLower(email)
+		if key != "" && !seen[key] {
+			seen[key] = true
+			result = append(result, addr)
+		}
+	}
+
+	// 3. Full message cache (From, To, CC)
+	for _, msg := range a.active.msgCache {
+		for _, addr := range []string{msg.From, msg.To, msg.CC} {
+			if addr == "" {
+				continue
+			}
+			// May be comma-separated
+			for _, part := range strings.Split(addr, ",") {
+				part = strings.TrimSpace(part)
+				email := extractEmail(part)
+				key := strings.ToLower(email)
+				if key != "" && !seen[key] {
+					seen[key] = true
+					result = append(result, part)
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// extractEmail pulls the bare email from an RFC 5322 address string.
+func extractEmail(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	addr, err := mail.ParseAddress(s)
+	if err != nil {
+		if strings.Contains(s, "@") {
+			return s
+		}
+		return ""
+	}
+	return addr.Address
+}
+
+func (a *App) filterSuggestions(input string, exclude []string) []string {
+	if input == "" {
+		return nil
+	}
+	lower := strings.ToLower(input)
+	excludeSet := make(map[string]bool, len(exclude))
+	for _, e := range exclude {
+		excludeSet[strings.ToLower(extractEmail(e))] = true
+	}
+
+	var result []string
+	for _, addr := range a.contactCache {
+		email := extractEmail(addr)
+		if excludeSet[strings.ToLower(email)] {
+			continue
+		}
+		if strings.Contains(strings.ToLower(addr), lower) {
+			result = append(result, addr)
+			if len(result) >= 5 {
+				break
+			}
+		}
+	}
+	return result
+}
+
+func (a *App) composeDialogActiveInput() *textinput.Model {
+	switch a.composeField {
+	case composeFieldTo:
+		return &a.composeToInput
+	case composeFieldCC:
+		return &a.composeCCInput
+	case composeFieldAttachments:
+		return &a.composeAttInput
+	default:
+		return &a.composeSubjectInput
+	}
+}
+
+func (a *App) composeDialogAdvanceField() {
+	switch a.composeField {
+	case composeFieldTo:
+		a.composeToInput.Blur()
+		a.composeField = composeFieldCC
+		a.composeCCInput.Focus()
+	case composeFieldCC:
+		a.composeCCInput.Blur()
+		a.composeField = composeFieldSubject
+		a.composeSubjectInput.Focus()
+	case composeFieldSubject:
+		a.composeSubjectInput.Blur()
+		a.composeField = composeFieldAttachments
+		a.composeAttInput.Focus()
+	}
+	a.composeSuggCursor = -1
+	a.composeSuggestions = nil
+}
+
+func (a *App) composeDialogRetreatField() {
+	switch a.composeField {
+	case composeFieldCC:
+		a.composeCCInput.Blur()
+		a.composeField = composeFieldTo
+		a.composeToInput.Focus()
+	case composeFieldSubject:
+		a.composeSubjectInput.Blur()
+		a.composeField = composeFieldCC
+		a.composeCCInput.Focus()
+	case composeFieldAttachments:
+		a.composeAttInput.Blur()
+		a.composeField = composeFieldSubject
+		a.composeSubjectInput.Focus()
+	}
+	a.composeSuggCursor = -1
+	a.composeSuggestions = nil
+}
+
+func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		a.showComposeDialog = false
+		// Save draft if there's content worth keeping
+		to := strings.Join(a.composeTo, ", ")
+		cc := strings.Join(a.composeCC, ", ")
+		subject := a.composeSubjectInput.Value()
+		body := a.composeBody
+		atts := a.composeAttachments
+		if to != "" || body != "" {
+			return a, func() tea.Msg {
+				return common.SaveDraftMsg{
+					To: to, CC: cc, Subject: subject, Body: body,
+					Attachments: atts,
+				}
+			}
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
+		// On To/CC: commit any typed text first
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+			a.commitComposeInput()
+		}
+		if a.composeField == composeFieldAttachments {
+			return a.launchComposeEditor()
+		}
+		a.composeDialogAdvanceField()
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab"))):
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+			a.commitComposeInput()
+		}
+		a.composeDialogRetreatField()
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+		if a.composeField == composeFieldSubject {
+			a.composeDialogAdvanceField()
+			return a, nil
+		}
+		if a.composeField == composeFieldAttachments {
+			// Add file if valid, or launch editor if empty
+			input := &a.composeAttInput
+			val := strings.TrimSpace(input.Value())
+			if a.composeSuggCursor >= 0 && a.composeSuggCursor < len(a.composeSuggestions) {
+				val = a.composeSuggestions[a.composeSuggCursor]
+			}
+			if val != "" {
+				// Expand ~ to home dir
+				if strings.HasPrefix(val, "~/") {
+					if home, err := os.UserHomeDir(); err == nil {
+						val = filepath.Join(home, val[2:])
+					}
+				}
+				// If it's a directory, set it as input for further navigation
+				if info, err := os.Stat(val); err == nil && info.IsDir() {
+					if !strings.HasSuffix(val, "/") {
+						val += "/"
+					}
+					input.SetValue(val)
+					a.updateComposeSuggestions()
+					return a, nil
+				}
+				// If file exists, add it
+				if _, err := os.Stat(val); err == nil {
+					a.composeAttachments = append(a.composeAttachments, gmail.AttachmentFile{Path: val})
+					input.SetValue("")
+					a.composeSuggCursor = -1
+					a.composeSuggestions = nil
+				}
+			} else {
+				// Empty enter → launch editor
+				return a.launchComposeEditor()
+			}
+			return a, nil
+		}
+		// On To/CC: add typed text or selected suggestion
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+			input := a.composeDialogActiveInput()
+			val := strings.TrimSpace(input.Value())
+
+			// If a suggestion is highlighted, use it
+			if a.composeSuggCursor >= 0 && a.composeSuggCursor < len(a.composeSuggestions) {
+				val = a.composeSuggestions[a.composeSuggCursor]
+			}
+
+			if val != "" {
+				if a.composeField == composeFieldTo {
+					a.composeTo = append(a.composeTo, val)
+				} else {
+					a.composeCC = append(a.composeCC, val)
+				}
+				input.SetValue("")
+				a.composeSuggCursor = -1
+				a.composeSuggestions = nil
+			} else {
+				// Empty input + enter: advance if we have recipients
+				if a.composeField == composeFieldTo && len(a.composeTo) > 0 {
+					a.composeDialogAdvanceField()
+				} else if a.composeField == composeFieldCC {
+					a.composeDialogAdvanceField()
+				}
+			}
+			return a, nil
+		}
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+		input := a.composeDialogActiveInput()
+		if input.Value() == "" {
+			// Remove last item from current list field
+			if a.composeField == composeFieldTo && len(a.composeTo) > 0 {
+				a.composeTo = a.composeTo[:len(a.composeTo)-1]
+			} else if a.composeField == composeFieldCC && len(a.composeCC) > 0 {
+				a.composeCC = a.composeCC[:len(a.composeCC)-1]
+			} else if a.composeField == composeFieldAttachments && len(a.composeAttachments) > 0 {
+				a.composeAttachments = a.composeAttachments[:len(a.composeAttachments)-1]
+			}
+			return a, nil
+		}
+		// Let textinput handle backspace
+		var cmd tea.Cmd
+		*input, cmd = input.Update(msg)
+		a.updateComposeSuggestions()
+		return a, cmd
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+		if len(a.composeSuggestions) > 0 {
+			a.composeSuggCursor--
+			if a.composeSuggCursor < -1 {
+				a.composeSuggCursor = len(a.composeSuggestions) - 1
+			}
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+		if len(a.composeSuggestions) > 0 {
+			a.composeSuggCursor++
+			if a.composeSuggCursor >= len(a.composeSuggestions) {
+				a.composeSuggCursor = -1
+			}
+		}
+		return a, nil
+	}
+
+	// Default: delegate to active textinput
+	input := a.composeDialogActiveInput()
+	var cmd tea.Cmd
+	*input, cmd = input.Update(msg)
+
+	// Update suggestions after text change (only for To/CC fields)
+	if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+		a.updateComposeSuggestions()
+	}
+	return a, cmd
+}
+
+func (a *App) commitComposeInput() {
+	input := a.composeDialogActiveInput()
+	val := strings.TrimSpace(input.Value())
+	if val == "" {
+		return
+	}
+	if a.composeField == composeFieldTo {
+		a.composeTo = append(a.composeTo, val)
+	} else if a.composeField == composeFieldCC {
+		a.composeCC = append(a.composeCC, val)
+	}
+	input.SetValue("")
+	a.composeSuggCursor = -1
+	a.composeSuggestions = nil
+}
+
+func (a *App) updateComposeSuggestions() {
+	input := a.composeDialogActiveInput()
+	val := input.Value()
+
+	if a.composeField == composeFieldAttachments {
+		a.composeSuggestions = filterFileSuggestions(val)
+		a.composeSuggCursor = -1
+		return
+	}
+
+	var exclude []string
+	if a.composeField == composeFieldTo {
+		exclude = a.composeTo
+	} else {
+		exclude = a.composeCC
+	}
+	a.composeSuggestions = a.filterSuggestions(val, exclude)
+	a.composeSuggCursor = -1
+}
+
+// filterFileSuggestions returns filesystem entries matching the typed path prefix.
+func filterFileSuggestions(input string) []string {
+	if input == "" {
+		return nil
+	}
+
+	// Expand ~
+	expanded := input
+	if strings.HasPrefix(expanded, "~/") {
+		if home, err := os.UserHomeDir(); err == nil {
+			expanded = filepath.Join(home, expanded[2:])
+		}
+	}
+
+	dir := filepath.Dir(expanded)
+	prefix := filepath.Base(expanded)
+	// If input ends with /, list the directory contents
+	if strings.HasSuffix(input, "/") {
+		dir = expanded
+		prefix = ""
+	}
+
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+
+	var result []string
+	for _, e := range entries {
+		name := e.Name()
+		// Skip hidden files unless the user is typing a dot
+		if strings.HasPrefix(name, ".") && !strings.HasPrefix(prefix, ".") {
+			continue
+		}
+		if prefix != "" && !strings.HasPrefix(strings.ToLower(name), strings.ToLower(prefix)) {
+			continue
+		}
+		full := filepath.Join(dir, name)
+		// Show with the user's original prefix style (preserve ~/)
+		display := full
+		if strings.HasPrefix(input, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				display = "~/" + strings.TrimPrefix(full, home+"/")
+			}
+		}
+		if e.IsDir() {
+			display += "/"
+		}
+		result = append(result, display)
+		if len(result) >= 8 {
+			break
+		}
+	}
+	return result
+}
+
+func (a App) launchComposeEditor() (tea.Model, tea.Cmd) {
+	if len(a.composeTo) == 0 {
+		// Don't launch editor without at least one recipient
+		return a, nil
+	}
+
+	a.showComposeDialog = false
+
+	to := strings.Join(a.composeTo, ", ")
+	cc := strings.Join(a.composeCC, ", ")
+	subject := a.composeSubjectInput.Value()
+
+	a.composer = composer.NewWithMetadata(
+		a.ctx, a.active.client, a.cfg.Editor(), a.composeBody,
+		a.width, a.height,
+		to, cc, subject,
+		a.composeThreadID, a.composeInReplyTo, a.composeDraftID,
+		a.composeAttachments,
+	)
+	a.screen = screenCompose
+	return a, a.composer.Init()
+}
+
+func (a App) renderComposeOverlay(base string) string {
+	innerWidth := 56
+	var lines []string
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(common.Primary).Render(a.composeTitle)
+	lines = append(lines, title)
+	lines = append(lines, "")
+
+	labelStyle := lipgloss.NewStyle().Bold(true).Foreground(common.White)
+	valueStyle := lipgloss.NewStyle().Foreground(common.Accent)
+	mutedStyle := lipgloss.NewStyle().Foreground(common.Muted)
+	activeLabel := lipgloss.NewStyle().Bold(true).Foreground(common.Primary)
+	suggHighlight := lipgloss.NewStyle().Bold(true).Foreground(common.White).Background(common.Primary)
+
+	// To field
+	toLabel := labelStyle
+	if a.composeField == composeFieldTo {
+		toLabel = activeLabel
+	}
+	toLine := toLabel.Render("To: ")
+	if len(a.composeTo) > 0 {
+		toLine += valueStyle.Render(strings.Join(a.composeTo, ", "))
+	}
+	lines = append(lines, toLine)
+	if a.composeField == composeFieldTo {
+		lines = append(lines, "  "+a.composeToInput.View())
+		// Suggestions
+		for i, s := range a.composeSuggestions {
+			prefix := "  "
+			if i == a.composeSuggCursor {
+				lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+			} else {
+				lines = append(lines, prefix+mutedStyle.Render(s))
+			}
+		}
+	}
+
+	lines = append(lines, "")
+
+	// CC field
+	ccLabel := labelStyle
+	if a.composeField == composeFieldCC {
+		ccLabel = activeLabel
+	}
+	ccLine := ccLabel.Render("CC: ")
+	if len(a.composeCC) > 0 {
+		ccLine += valueStyle.Render(strings.Join(a.composeCC, ", "))
+	} else if a.composeField != composeFieldCC {
+		ccLine += mutedStyle.Render("(none)")
+	}
+	lines = append(lines, ccLine)
+	if a.composeField == composeFieldCC {
+		lines = append(lines, "  "+a.composeCCInput.View())
+		for i, s := range a.composeSuggestions {
+			if i == a.composeSuggCursor {
+				lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+			} else {
+				lines = append(lines, "  "+mutedStyle.Render(s))
+			}
+		}
+	}
+
+	lines = append(lines, "")
+
+	// Subject field
+	subjectLabel := labelStyle
+	if a.composeField == composeFieldSubject {
+		subjectLabel = activeLabel
+	}
+	if a.composeField == composeFieldSubject {
+		lines = append(lines, subjectLabel.Render("Subject: ")+a.composeSubjectInput.View())
+	} else {
+		subjectVal := a.composeSubjectInput.Value()
+		if subjectVal == "" {
+			subjectVal = "(empty)"
+		}
+		lines = append(lines, subjectLabel.Render("Subject: ")+mutedStyle.Render(subjectVal))
+	}
+
+	lines = append(lines, "")
+
+	// Attachments field
+	attLabel := labelStyle
+	if a.composeField == composeFieldAttachments {
+		attLabel = activeLabel
+	}
+	attLine := attLabel.Render("Attach: ")
+	if len(a.composeAttachments) == 0 && a.composeField != composeFieldAttachments {
+		attLine += mutedStyle.Render("(none)")
+	}
+	lines = append(lines, attLine)
+	for _, att := range a.composeAttachments {
+		size := ""
+		if info, err := os.Stat(att.Path); err == nil {
+			size = formatFileSize(info.Size())
+		}
+		lines = append(lines, "  "+valueStyle.Render(filepath.Base(att.Path))+" "+mutedStyle.Render(size))
+	}
+	if a.composeField == composeFieldAttachments {
+		lines = append(lines, "  "+a.composeAttInput.View())
+		for i, s := range a.composeSuggestions {
+			if i == a.composeSuggCursor {
+				lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+			} else {
+				lines = append(lines, "  "+mutedStyle.Render(s))
+			}
+		}
+	}
+
+	lines = append(lines, "")
+
+	// Help
+	helpStyle := lipgloss.NewStyle().Foreground(common.Muted)
+	switch a.composeField {
+	case composeFieldSubject:
+		lines = append(lines, helpStyle.Render("enter=next  tab=next  shift+tab=back  esc=cancel"))
+	case composeFieldAttachments:
+		lines = append(lines, helpStyle.Render("enter=add file  tab/enter(empty)=open editor"))
+		lines = append(lines, helpStyle.Render("shift+tab=back  backspace=remove  esc=cancel"))
+	default:
+		lines = append(lines, helpStyle.Render("enter=add  tab=next  shift+tab=back  esc=cancel"))
+		lines = append(lines, helpStyle.Render("backspace on empty=remove last"))
+	}
+
+	content := strings.Join(lines, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(common.Secondary).
+		Padding(1, 2).
+		Width(innerWidth + 4) // +4 for padding
+
+	rendered := box.Render(content)
+	return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, rendered)
 }

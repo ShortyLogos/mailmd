@@ -13,7 +13,6 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/deric/mailmd/internal/gmail"
-	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
 	rw "github.com/mattn/go-runewidth"
 )
@@ -160,6 +159,40 @@ func (m *Model) fc() *folderCache {
 		m.cache[m.tabIdx].selected = make(map[string]bool)
 	}
 	return m.cache[m.tabIdx]
+}
+
+// RecentAddresses returns deduplicated email addresses from all cached folder messages.
+func (m Model) RecentAddresses() []string {
+	seen := make(map[string]bool)
+	var result []string
+
+	addAddrs := func(raw string) {
+		// Split comma-separated address lists into individual entries
+		for _, part := range strings.Split(raw, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" && !seen[part] {
+				seen[part] = true
+				result = append(result, part)
+			}
+		}
+	}
+
+	for _, fc := range m.cache {
+		if fc == nil {
+			continue
+		}
+		for _, msg := range fc.messages {
+			addAddrs(msg.From)
+			addAddrs(msg.To)
+		}
+	}
+	if m.searchCache != nil {
+		for _, msg := range m.searchCache.messages {
+			addAddrs(msg.From)
+			addAddrs(msg.To)
+		}
+	}
+	return result
 }
 
 // selectedIDs returns the IDs of all selected messages, or the cursor message if none selected.
@@ -810,8 +843,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, common.Keys.Compose):
-			tmpl := markdown.ComposeTemplate()
-			return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
+			return m, func() tea.Msg { return common.ComposeMsg{Title: "Compose"} }
 
 		case key.Matches(msg, common.Keys.Refresh):
 			m.syncing = true

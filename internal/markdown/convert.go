@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"regexp"
+	"strings"
 
 	"github.com/yuin/goldmark"
 	highlighting "github.com/yuin/goldmark-highlighting/v2"
@@ -36,8 +38,55 @@ func Convert(source string) (string, error) {
 	return wrapHTML(buf.String()), nil
 }
 
+var (
+	reImage     = regexp.MustCompile(`!\[([^\]]*)\]\([^)]+\)`)
+	reLink      = regexp.MustCompile(`\[([^\]]+)\]\(([^)]+)\)`)
+	reBoldStar  = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	reBoldUnd   = regexp.MustCompile(`__(.+?)__`)
+	reItalStar  = regexp.MustCompile(`\*(.+?)\*`)
+	reItalUnd   = regexp.MustCompile(`_(.+?)_`)
+	reStrike    = regexp.MustCompile(`~~(.+?)~~`)
+	reInlineCode = regexp.MustCompile("`([^`]+)`")
+	reHeading   = regexp.MustCompile(`^#{1,6}\s+`)
+)
+
+// ConvertPlain strips Markdown formatting to produce readable plain text
+// for the text/plain MIME alternative.
 func ConvertPlain(source string) string {
-	return source
+	lines := strings.Split(source, "\n")
+	var out []string
+	inFence := false
+	for _, line := range lines {
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence {
+			out = append(out, line)
+			continue
+		}
+		// Strip heading markers
+		line = reHeading.ReplaceAllString(line, "")
+		// Images: ![alt](url) → alt
+		line = reImage.ReplaceAllString(line, "$1")
+		// Links: [text](url) → text (url)
+		line = reLink.ReplaceAllString(line, "$1 ($2)")
+		// Bold, italic, strikethrough
+		line = reBoldStar.ReplaceAllString(line, "$1")
+		line = reBoldUnd.ReplaceAllString(line, "$1")
+		line = reItalStar.ReplaceAllString(line, "$1")
+		line = reItalUnd.ReplaceAllString(line, "$1")
+		line = reStrike.ReplaceAllString(line, "$1")
+		// Inline code
+		line = reInlineCode.ReplaceAllString(line, "$1")
+		// Horizontal rules
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "---" || trimmed == "***" || trimmed == "___" {
+			line = strings.Repeat("-", 40)
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
 }
 
 func wrapHTML(body string) string {

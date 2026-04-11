@@ -23,6 +23,7 @@ func parseMessageSummary(msg *gapi.Message) MessageSummary {
 	return MessageSummary{
 		ID:             msg.Id,
 		From:           getHeader(headers, "From"),
+		To:             getHeader(headers, "To"),
 		Subject:        getHeader(headers, "Subject"),
 		Snippet:        html.UnescapeString(msg.Snippet),
 		Date:           date,
@@ -39,8 +40,10 @@ func parseMessage(msg *gapi.Message) *Message {
 	return &Message{
 		ID:          msg.Id,
 		ThreadID:    msg.ThreadId,
+		MessageID:   getHeader(headers, "Message-ID"),
 		From:        getHeader(headers, "From"),
 		To:          getHeader(headers, "To"),
+		CC:          getHeader(headers, "Cc"),
 		Subject:     getHeader(headers, "Subject"),
 		Date:        date,
 		Body:        plain,

@@ -31,40 +31,75 @@ type editorDoneMsg struct {
 
 // Model is the composer Bubble Tea model.
 type Model struct {
-	ctx      context.Context
-	client   gmail.Client
-	editor   string
-	template string
-	phase    phase
-	data     *markdown.ComposeData
-	viewport viewport.Model
-	width    int
-	height   int
-	ready    bool
-	err      string
-	status   string
-	tmpFile  string
-	draftID  string // if editing a draft, the original message ID to trash after send
+	ctx       context.Context
+	client    gmail.Client
+	editor    string
+	template  string
+	phase     phase
+	data      *markdown.ComposeData
+	viewport  viewport.Model
+	width     int
+	height    int
+	ready     bool
+	err       string
+	status    string
+	tmpFile   string
+	draftID   string // if editing a draft, the original message ID to trash after send
+	threadID  string // Gmail thread ID for reply threading
+	inReplyTo string // RFC 2822 Message-ID for In-Reply-To header
+	// Structured metadata (set by compose dialog, bypasses frontmatter)
+	metaTo      string
+	metaCC      string
+	metaSubject string
+	attachments []gmail.AttachmentFile
 }
 
 // New creates a new composer model.
-func New(ctx context.Context, client gmail.Client, editor, template string, width, height int) Model {
+func New(ctx context.Context, client gmail.Client, editor, template string, width, height int, threadID, inReplyTo string) Model {
 	return Model{
-		ctx:      ctx,
-		client:   client,
-		editor:   editor,
-		template: template,
-		phase:    phaseEditing,
-		width:    width,
-		height:   height,
+		ctx:       ctx,
+		client:    client,
+		editor:    editor,
+		template:  template,
+		phase:     phaseEditing,
+		width:     width,
+		height:    height,
+		threadID:  threadID,
+		inReplyTo: inReplyTo,
 	}
 }
 
 // NewDraftEdit creates a composer for editing an existing draft.
 func NewDraftEdit(ctx context.Context, client gmail.Client, editor, template string, width, height int, draftID string) Model {
-	m := New(ctx, client, editor, template, width, height)
+	m := New(ctx, client, editor, template, width, height, "", "")
 	m.draftID = draftID
 	return m
+}
+
+// NewWithMetadata creates a composer with pre-set metadata from the compose dialog.
+// The editor opens with body content only (no frontmatter).
+func NewWithMetadata(ctx context.Context, client gmail.Client, editor, body string, width, height int, to, cc, subject, threadID, inReplyTo, draftID string, attachments []gmail.AttachmentFile) Model {
+	return Model{
+		ctx:         ctx,
+		client:      client,
+		editor:      editor,
+		template:    body,
+		phase:       phaseEditing,
+		width:       width,
+		height:      height,
+		threadID:    threadID,
+		inReplyTo:   inReplyTo,
+		draftID:     draftID,
+		metaTo:      to,
+		metaCC:      cc,
+		metaSubject: subject,
+		attachments: attachments,
+	}
+}
+
+// Data returns the current compose data (may be nil before editor completes).
+func (m Model) Data() *markdown.ComposeData {
+	return m.data
 }
 
 // Init launches the editor immediately.
@@ -148,20 +183,36 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
-		data, err := markdown.ParseCompose(msg.content)
-		if err != nil {
-			m.err = "Parse error: " + err.Error()
-			// Allow re-edit
-			m.phase = phasePreview
-			m.initViewport("# Parse Error\n\n" + err.Error() + "\n\nPress **e** to edit again or **esc** to cancel.")
-			return m, nil
+		if m.metaTo != "" {
+			// Metadata mode: body-only editor, skip frontmatter parsing
+			m.data = &markdown.ComposeData{
+				To:      m.metaTo,
+				CC:      m.metaCC,
+				Subject: m.metaSubject,
+				Body:    msg.content,
+			}
+		} else {
+			data, err := markdown.ParseCompose(msg.content)
+			if err != nil {
+				m.err = "Parse error: " + err.Error()
+				m.phase = phasePreview
+				m.initViewport("# Parse Error\n\n" + err.Error() + "\n\nPress **e** to edit again or **esc** to cancel.")
+				return m, nil
+			}
+			m.data = data
 		}
 
-		m.data = data
 		m.phase = phasePreview
 		m.err = ""
-		m.status = fmt.Sprintf("To: %s | Subject: %s", data.To, data.Subject)
-		m.initViewport(data.Body)
+		status := fmt.Sprintf("To: %s | Subject: %s", m.data.To, m.data.Subject)
+		if m.data.CC != "" {
+			status = fmt.Sprintf("To: %s | CC: %s | Subject: %s", m.data.To, m.data.CC, m.data.Subject)
+		}
+		if len(m.attachments) > 0 {
+			status += fmt.Sprintf(" | %d attachment(s)", len(m.attachments))
+		}
+		m.status = status
+		m.initViewport(m.data.Body)
 
 	case tea.KeyMsg:
 		if m.phase == phasePreview {
@@ -173,16 +224,44 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 			case key.Matches(msg, common.Keys.Edit):
 				if m.data != nil {
-					// Re-open editor with current content
-					var sb strings.Builder
-					sb.WriteString("---\n")
-					sb.WriteString("to: " + m.data.To + "\n")
-					sb.WriteString("subject: " + m.data.Subject + "\n")
-					sb.WriteString("---\n\n")
-					sb.WriteString(m.data.Body)
-					content := sb.String()
+					var content string
+					if m.metaTo != "" {
+						// Metadata mode: body only
+						content = m.data.Body
+					} else {
+						// Legacy mode: reconstruct frontmatter
+						var sb strings.Builder
+						sb.WriteString("---\n")
+						sb.WriteString("to: " + m.data.To + "\n")
+						sb.WriteString("subject: " + m.data.Subject + "\n")
+						sb.WriteString("---\n\n")
+						sb.WriteString(m.data.Body)
+						content = sb.String()
+					}
 					m.phase = phaseEditing
 					return m, m.launchEditor(content)
+				}
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("H"))):
+				if m.data != nil {
+					to := splitList(m.data.To)
+					cc := splitList(m.data.CC)
+					data := m.data
+					draftID := m.draftID
+					threadID := m.threadID
+					inReplyTo := m.inReplyTo
+					atts := m.attachments
+					return m, func() tea.Msg {
+						return common.EditHeadersMsg{
+							To: to, CC: cc,
+							Subject:     data.Subject,
+							Body:        data.Body,
+							ThreadID:    threadID,
+							InReplyTo:   inReplyTo,
+							DraftID:     draftID,
+							Attachments: atts,
+						}
+					}
 				}
 
 			case key.Matches(msg, common.Keys.BPreview):
@@ -191,6 +270,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 
 			case key.Matches(msg, common.Keys.Back):
+				if m.data != nil && (m.data.To != "" || m.data.Body != "") {
+					data := m.data
+					atts := m.attachments
+					return m, func() tea.Msg {
+						return common.SaveDraftMsg{
+							To: data.To, CC: data.CC,
+							Subject: data.Subject, Body: data.Body,
+							Attachments: atts,
+						}
+					}
+				}
 				return m, func() tea.Msg { return common.BackToInboxMsg{} }
 
 			case key.Matches(msg, common.Keys.Quit):
@@ -206,23 +296,34 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	return m, nil
 }
 
+// Attachments returns the list of attachment file paths.
+func (m Model) Attachments() []gmail.AttachmentFile {
+	return m.attachments
+}
+
 func (m Model) sendMessage() tea.Cmd {
 	data := m.data
 	draftID := m.draftID
+	threadID := m.threadID
+	inReplyTo := m.inReplyTo
+	atts := m.attachments
 	return func() tea.Msg {
 		htmlBody, err := markdown.Convert(data.Body)
 		if err != nil {
 			return common.SendResultMsg{Err: fmt.Errorf("markdown conversion: %w", err)}
 		}
 		plainBody := markdown.ConvertPlain(data.Body)
-		if err := m.client.SendMessage(m.ctx, data.To, data.Subject, htmlBody, plainBody); err != nil {
-			return common.SendResultMsg{Err: fmt.Errorf("send failed: %w", err)}
+		return common.QueueSendMsg{
+			To:          data.To,
+			CC:          data.CC,
+			Subject:     data.Subject,
+			HTMLBody:    htmlBody,
+			PlainBody:   plainBody,
+			ThreadID:    threadID,
+			InReplyTo:   inReplyTo,
+			DraftID:     draftID,
+			Attachments: atts,
 		}
-		// Trash the original draft after successful send
-		if draftID != "" {
-			m.client.TrashMessage(m.ctx, draftID)
-		}
-		return common.SendResultMsg{Err: nil}
 	}
 }
 
@@ -261,6 +362,20 @@ func commandExists(name string) bool {
 	return err == nil
 }
 
+func splitList(s string) []string {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	var result []string
+	for _, p := range strings.Split(s, ",") {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
+}
+
 // View renders the composer preview screen.
 func (m Model) View() string {
 	if m.phase == phaseEditing {
@@ -284,7 +399,7 @@ func (m Model) View() string {
 		statusLine = "Preview"
 	}
 	b.WriteString(common.StatusBar.Width(m.width).Render(statusLine) + "\n")
-	b.WriteString(common.StatusBar.Width(m.width).Render(" y=send  e=edit  P=browser preview  esc=cancel  q=quit"))
+	b.WriteString(common.StatusBar.Width(m.width).Render(" y=send  e=edit body  H=edit headers  P=browser preview  esc=cancel"))
 
 	return b.String()
 }

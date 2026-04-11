@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"mime"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -12,13 +15,19 @@ import (
 	"google.golang.org/api/option"
 )
 
+// AttachmentFile represents a local file to attach to an outgoing message.
+type AttachmentFile struct {
+	Path string // absolute or relative file path
+}
+
 // Client is the Gmail API client interface.
 type Client interface {
 	ListLabels(ctx context.Context) ([]Label, error)
 	ListMessages(ctx context.Context, labelID string, query string, pageToken string, maxResults ...int64) (*MessageList, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
-	SendMessage(ctx context.Context, to, subject, htmlBody, plainBody string) error
-	ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error
+	SendMessage(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
+	ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
+	CreateDraft(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
 	ForwardMessage(ctx context.Context, messageID, to string) error
 	TrashMessage(ctx context.Context, id string) error
 	TrashMessages(ctx context.Context, ids []string) error
@@ -93,14 +102,14 @@ func (c *gmailClient) ListMessages(ctx context.Context, labelID string, query st
 
 			msg, err := c.svc.Users.Messages.Get(c.user, id).
 				Format("metadata").
-				MetadataHeaders("From", "Subject", "Date").
+				MetadataHeaders("From", "To", "Subject", "Date").
 				Context(ctx).
 				Do()
 			if err != nil {
 				// Retry once on transient failure
 				msg, err = c.svc.Users.Messages.Get(c.user, id).
 					Format("metadata").
-					MetadataHeaders("From", "Subject", "Date").
+					MetadataHeaders("From", "To", "Subject", "Date").
 					Context(ctx).
 					Do()
 			}
@@ -127,17 +136,71 @@ func (c *gmailClient) GetMessage(ctx context.Context, id string) (*Message, erro
 
 // --- Write operations ---
 
-func buildMIMEMessage(to, subject, htmlBody, plainBody, inReplyTo string) string {
-	boundary := "mailmd-boundary-1234567890"
+func buildMIMEMessage(to, cc, subject, htmlBody, plainBody, inReplyTo string, attachments []AttachmentFile) string {
+	altBoundary := "mailmd-alt-boundary"
 	var b strings.Builder
+
+	// Headers
 	b.WriteString("To: " + to + "\r\n")
+	if cc != "" {
+		b.WriteString("Cc: " + cc + "\r\n")
+	}
 	b.WriteString("Subject: " + subject + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
 	if inReplyTo != "" {
 		b.WriteString("In-Reply-To: " + inReplyTo + "\r\n")
 		b.WriteString("References: " + inReplyTo + "\r\n")
 	}
-	b.WriteString("Content-Type: multipart/alternative; boundary=" + boundary + "\r\n\r\n")
+
+	if len(attachments) == 0 {
+		// Simple multipart/alternative (text + HTML)
+		b.WriteString("Content-Type: multipart/alternative; boundary=" + altBoundary + "\r\n\r\n")
+		writeAlternativeParts(&b, altBoundary, plainBody, htmlBody)
+		return b.String()
+	}
+
+	// With attachments: multipart/mixed wrapping multipart/alternative + file parts
+	mixedBoundary := "mailmd-mixed-boundary"
+	b.WriteString("Content-Type: multipart/mixed; boundary=" + mixedBoundary + "\r\n\r\n")
+
+	// Body part (multipart/alternative)
+	b.WriteString("--" + mixedBoundary + "\r\n")
+	b.WriteString("Content-Type: multipart/alternative; boundary=" + altBoundary + "\r\n\r\n")
+	writeAlternativeParts(&b, altBoundary, plainBody, htmlBody)
+
+	// Attachment parts
+	for _, att := range attachments {
+		data, err := os.ReadFile(att.Path)
+		if err != nil {
+			continue // skip unreadable files
+		}
+		filename := filepath.Base(att.Path)
+		mimeType := mime.TypeByExtension(filepath.Ext(att.Path))
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
+		}
+
+		b.WriteString("--" + mixedBoundary + "\r\n")
+		b.WriteString("Content-Type: " + mimeType + "\r\n")
+		b.WriteString("Content-Transfer-Encoding: base64\r\n")
+		b.WriteString("Content-Disposition: attachment; filename=\"" + filename + "\"\r\n\r\n")
+
+		encoded := base64.StdEncoding.EncodeToString(data)
+		// Wrap at 76 chars per RFC 2045
+		for i := 0; i < len(encoded); i += 76 {
+			end := i + 76
+			if end > len(encoded) {
+				end = len(encoded)
+			}
+			b.WriteString(encoded[i:end] + "\r\n")
+		}
+	}
+
+	b.WriteString("--" + mixedBoundary + "--\r\n")
+	return b.String()
+}
+
+func writeAlternativeParts(b *strings.Builder, boundary, plainBody, htmlBody string) {
 	b.WriteString("--" + boundary + "\r\n")
 	b.WriteString("Content-Type: text/plain; charset=utf-8\r\n\r\n")
 	b.WriteString(plainBody + "\r\n")
@@ -145,26 +208,34 @@ func buildMIMEMessage(to, subject, htmlBody, plainBody, inReplyTo string) string
 	b.WriteString("Content-Type: text/html; charset=utf-8\r\n\r\n")
 	b.WriteString(htmlBody + "\r\n")
 	b.WriteString("--" + boundary + "--\r\n")
-	return b.String()
 }
 
-func buildRawMessage(to, subject, htmlBody, plainBody string) string {
-	mime := buildMIMEMessage(to, subject, htmlBody, plainBody, "")
-	return base64.URLEncoding.EncodeToString([]byte(mime))
+func buildRawMessage(to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) string {
+	msg := buildMIMEMessage(to, cc, subject, htmlBody, plainBody, "", attachments)
+	return base64.URLEncoding.EncodeToString([]byte(msg))
 }
 
-func (c *gmailClient) SendMessage(ctx context.Context, to, subject, htmlBody, plainBody string) error {
-	raw := buildRawMessage(to, subject, htmlBody, plainBody)
+func (c *gmailClient) SendMessage(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	raw := buildRawMessage(to, cc, subject, htmlBody, plainBody, attachments)
 	msg := &gapi.Message{Raw: raw}
 	_, err := c.svc.Users.Messages.Send(c.user, msg).Context(ctx).Do()
 	return err
 }
 
-func (c *gmailClient) ReplyMessage(ctx context.Context, threadID, to, subject, htmlBody, plainBody string) error {
-	mime := buildMIMEMessage(to, subject, htmlBody, plainBody, threadID)
-	raw := base64.URLEncoding.EncodeToString([]byte(mime))
-	msg := &gapi.Message{Raw: raw, ThreadId: threadID}
-	_, err := c.svc.Users.Messages.Send(c.user, msg).Context(ctx).Do()
+func (c *gmailClient) ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	msg := buildMIMEMessage(to, cc, subject, htmlBody, plainBody, inReplyTo, attachments)
+	raw := base64.URLEncoding.EncodeToString([]byte(msg))
+	apiMsg := &gapi.Message{Raw: raw, ThreadId: threadID}
+	_, err := c.svc.Users.Messages.Send(c.user, apiMsg).Context(ctx).Do()
+	return err
+}
+
+func (c *gmailClient) CreateDraft(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	raw := buildRawMessage(to, cc, subject, htmlBody, plainBody, attachments)
+	draft := &gapi.Draft{
+		Message: &gapi.Message{Raw: raw},
+	}
+	_, err := c.svc.Users.Drafts.Create(c.user, draft).Context(ctx).Do()
 	return err
 }
 
@@ -178,7 +249,7 @@ func (c *gmailClient) ForwardMessage(ctx context.Context, messageID, to string) 
 	if original.HTMLBody != "" {
 		body = original.HTMLBody
 	}
-	return c.SendMessage(ctx, to, subject, body, original.Body)
+	return c.SendMessage(ctx, to, "", subject, body, original.Body, nil)
 }
 
 func (c *gmailClient) TrashMessage(ctx context.Context, id string) error {

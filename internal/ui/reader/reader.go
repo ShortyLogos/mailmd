@@ -18,7 +18,6 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/deric/mailmd/internal/gmail"
-	"github.com/deric/mailmd/internal/markdown"
 	"github.com/deric/mailmd/internal/ui/common"
 	rw "github.com/mattn/go-runewidth"
 	nethtml "golang.org/x/net/html"
@@ -871,14 +870,31 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.Reply):
 			if m.message != nil {
-				tmpl := markdown.ReplyTemplate(m.message.From, "Re: "+m.message.Subject, m.message.Body)
-				return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
+				msg := m.message
+				quotedBody := quoteBody(msg.Body)
+				return m, func() tea.Msg {
+					return common.ComposeMsg{
+						To:        []string{msg.From},
+						Subject:   "Re: " + msg.Subject,
+						Body:      quotedBody,
+						ThreadID:  msg.ThreadID,
+						InReplyTo: msg.MessageID,
+						Title:     "Reply",
+					}
+				}
 			}
 
 		case key.Matches(msg, common.Keys.Forward):
 			if m.message != nil {
-				tmpl := markdown.ForwardTemplate(m.message.Subject, m.message.Body, m.message.From)
-				return m, func() tea.Msg { return common.ComposeMsg{Template: tmpl} }
+				msg := m.message
+				fwdBody := "---------- Forwarded message ----------\nFrom: " + msg.From + "\n\n" + msg.Body + "\n"
+				return m, func() tea.Msg {
+					return common.ComposeMsg{
+						Subject: "Fwd: " + msg.Subject,
+						Body:    fwdBody,
+						Title:   "Forward",
+					}
+				}
 			}
 
 		case key.Matches(msg, common.Keys.Edit):
@@ -1170,4 +1186,13 @@ func formatSize(bytes int64) string {
 		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+}
+
+func quoteBody(body string) string {
+	var b strings.Builder
+	b.WriteString("\n")
+	for _, line := range strings.Split(body, "\n") {
+		b.WriteString("> " + line + "\n")
+	}
+	return b.String()
 }
