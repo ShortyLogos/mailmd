@@ -8,6 +8,7 @@ import (
 type ComposeData struct {
 	To      string
 	CC      string
+	BCC     string
 	Subject string
 	Body    string
 }

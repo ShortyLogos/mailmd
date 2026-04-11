@@ -50,6 +50,7 @@ type Model struct {
 	// Structured metadata (set by compose dialog, bypasses frontmatter)
 	metaTo      string
 	metaCC      string
+	metaBCC     string
 	metaSubject string
 	attachments []gmail.AttachmentFile
 }
@@ -78,7 +79,7 @@ func NewDraftEdit(ctx context.Context, client gmail.Client, editor, template str
 
 // NewWithMetadata creates a composer with pre-set metadata from the compose dialog.
 // The editor opens with body content only (no frontmatter).
-func NewWithMetadata(ctx context.Context, client gmail.Client, editor, body string, width, height int, to, cc, subject, threadID, inReplyTo, draftID string, attachments []gmail.AttachmentFile) Model {
+func NewWithMetadata(ctx context.Context, client gmail.Client, editor, body string, width, height int, to, cc, bcc, subject, threadID, inReplyTo, draftID string, attachments []gmail.AttachmentFile) Model {
 	return Model{
 		ctx:         ctx,
 		client:      client,
@@ -92,6 +93,7 @@ func NewWithMetadata(ctx context.Context, client gmail.Client, editor, body stri
 		draftID:     draftID,
 		metaTo:      to,
 		metaCC:      cc,
+		metaBCC:     bcc,
 		metaSubject: subject,
 		attachments: attachments,
 	}
@@ -188,6 +190,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.data = &markdown.ComposeData{
 				To:      m.metaTo,
 				CC:      m.metaCC,
+				BCC:     m.metaBCC,
 				Subject: m.metaSubject,
 				Body:    msg.content,
 			}
@@ -207,6 +210,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		status := fmt.Sprintf("To: %s | Subject: %s", m.data.To, m.data.Subject)
 		if m.data.CC != "" {
 			status = fmt.Sprintf("To: %s | CC: %s | Subject: %s", m.data.To, m.data.CC, m.data.Subject)
+		}
+		if m.data.BCC != "" {
+			status += fmt.Sprintf(" | BCC: %s", m.data.BCC)
 		}
 		if len(m.attachments) > 0 {
 			status += fmt.Sprintf(" | %d attachment(s)", len(m.attachments))
@@ -246,6 +252,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				if m.data != nil {
 					to := splitList(m.data.To)
 					cc := splitList(m.data.CC)
+					bcc := splitList(m.data.BCC)
 					data := m.data
 					draftID := m.draftID
 					threadID := m.threadID
@@ -253,7 +260,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					atts := m.attachments
 					return m, func() tea.Msg {
 						return common.EditHeadersMsg{
-							To: to, CC: cc,
+							To: to, CC: cc, BCC: bcc,
 							Subject:     data.Subject,
 							Body:        data.Body,
 							ThreadID:    threadID,
@@ -275,7 +282,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					atts := m.attachments
 					return m, func() tea.Msg {
 						return common.SaveDraftMsg{
-							To: data.To, CC: data.CC,
+							To: data.To, CC: data.CC, BCC: data.BCC,
 							Subject: data.Subject, Body: data.Body,
 							Attachments: atts,
 						}
@@ -316,6 +323,7 @@ func (m Model) sendMessage() tea.Cmd {
 		return common.QueueSendMsg{
 			To:          data.To,
 			CC:          data.CC,
+			BCC:         data.BCC,
 			Subject:     data.Subject,
 			HTMLBody:    htmlBody,
 			PlainBody:   plainBody,

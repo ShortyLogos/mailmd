@@ -6,7 +6,7 @@ type KeyMap struct {
 	Up, Down, Open, Back, Compose, Reply, Forward, Trash    key.Binding
 	Preview, BPreview, NextTab, PrevTab, Send, Edit          key.Binding
 	Refresh, Restore, Select, SelectAll, Quit, Help          key.Binding
-	Home, End                                                key.Binding
+	Home, End, Archive                                       key.Binding
 }
 
 var Keys = KeyMap{
@@ -32,4 +32,5 @@ var Keys = KeyMap{
 	Help:     key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	Home:     key.NewBinding(key.WithKeys("home", "pgup"), key.WithHelp("Home", "top")),
 	End:      key.NewBinding(key.WithKeys("end", "pgdown"), key.WithHelp("End", "bottom")),
+	Archive:  key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "archive")),
 }

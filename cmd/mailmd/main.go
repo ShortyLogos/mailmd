@@ -117,6 +117,9 @@ INBOX
   c                  Compose new email
   r                  Reply to message
   e                  Edit draft (in Drafts folder)
+  s                  Toggle star
+  t                  Apply label to message
+  A                  Archive (remove from Inbox, keep in All Mail)
   d                  Trash / permanently delete
   b                  Block sender (auto-trash future mail)
   m                  Toggle read / unread
@@ -126,6 +129,7 @@ INBOX
   f / /              Search
   R                  Refresh
   p                  Toggle preview pane
+  L                  Browse labels (custom Gmail labels)
   S                  Switch account
   K                  Show keybindings help
   q / ctrl+c         Quit
@@ -136,6 +140,7 @@ READER
   esc / h            Back to inbox
   r                  Reply
   f                  Forward
+  A                  Archive message (in Inbox)
   d                  Trash message
   N + l              Open link N in browser
   N + enter          Open attachment N
@@ -148,6 +153,8 @@ COMPOSE DIALOG
   enter              Add recipient/attachment, or advance
   backspace          Remove last item (on empty input)
   up / down          Navigate autocomplete suggestions
+  ctrl+b             Show BCC field
+  ctrl+t             Insert template (if configured)
   esc                Cancel (saves draft if content exists)
 
 PREVIEW (after writing body)
@@ -166,6 +173,79 @@ EDITOR TIPS
     Nano:        Ctrl+R
     Emacs:       C-x i`)
 
+	case "config":
+		fmt.Println(`mailmd config — Configuration reference
+
+Config file location: ~/.config/mailmd/config.toml
+
+SIGNATURES
+
+Add a signature per account. It's appended as Markdown when composing.
+
+  [[accounts]]
+  name = "Work"
+  email = "alice@work.com"
+  signature = """
+  ---
+  **Alice Smith** | Engineering
+  alice@work.com | (555) 123-4567
+  """
+
+  [[accounts]]
+  name = "Personal"
+  email = "alice@gmail.com"
+  signature = "— Alice"
+
+TEMPLATES
+
+Define reusable email templates. Access with ctrl+t in the compose dialog.
+
+  [templates.standup]
+  subject = "Standup Update"
+  body = """
+  **Yesterday:**
+  -
+
+  **Today:**
+  -
+
+  **Blockers:**
+  - None
+  """
+
+  [templates.intro]
+  body = """
+  Hi,
+
+  My name is Alice and I'm reaching out because...
+
+  Best,
+  Alice
+  """
+
+CONTACT GROUPS
+
+Define groups that expand in the To/CC/BCC fields.
+
+  [contact_groups]
+  team = ["alice@work.com", "bob@work.com", "carol@work.com"]
+  leads = ["dave@work.com", "eve@work.com"]
+
+THEMES
+
+Set a color theme. Available: default, solarized, nord, gruvbox.
+
+  [general]
+  theme = "nord"
+
+OTHER SETTINGS
+
+  [general]
+  editor = "nvim"       # defaults to $EDITOR, then vi
+
+  [preview]
+  browser = "firefox"   # defaults to system browser`)
+
 	default:
 		fmt.Println(`mailmd — A terminal email client for Gmail
 
@@ -180,6 +260,7 @@ Topics:
   compose       Compose command flags and examples
   draft         Draft command flags and examples (incl. LLM integration)
   keys          Full keybindings reference
+  config        Signatures, templates, contact groups, themes
 
 Examples:
   mailmd
@@ -300,7 +381,7 @@ func runDraft(args []string) error {
 		plainBody = markdown.ConvertPlain(body)
 	}
 
-	if err := client.CreateDraft(ctx, toStr, ccStr, subject, htmlBody, plainBody, nil); err != nil {
+	if err := client.CreateDraft(ctx, toStr, ccStr, "", subject, htmlBody, plainBody, nil); err != nil {
 		return fmt.Errorf("creating draft: %w", err)
 	}
 
@@ -320,6 +401,11 @@ func runTUI(initialCompose *common.ComposeMsg) error {
 	cfg, err := config.LoadOrCreate(cfgPath)
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+
+	// Apply theme from config
+	if cfg.General.Theme != "" && cfg.General.Theme != "default" {
+		common.ApplyTheme(cfg.General.Theme)
 	}
 
 	id, secret := oauthCreds()

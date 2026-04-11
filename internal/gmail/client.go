@@ -25,9 +25,9 @@ type Client interface {
 	ListLabels(ctx context.Context) ([]Label, error)
 	ListMessages(ctx context.Context, labelID string, query string, pageToken string, maxResults ...int64) (*MessageList, error)
 	GetMessage(ctx context.Context, id string) (*Message, error)
-	SendMessage(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
-	ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
-	CreateDraft(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
+	SendMessage(ctx context.Context, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
+	ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
+	CreateDraft(ctx context.Context, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error
 	ForwardMessage(ctx context.Context, messageID, to string) error
 	TrashMessage(ctx context.Context, id string) error
 	TrashMessages(ctx context.Context, ids []string) error
@@ -40,6 +40,9 @@ type Client interface {
 	CheckAttachments(ctx context.Context, ids []string) (map[string]bool, error)
 	GetProfile(ctx context.Context) (string, error)
 	BlockSender(ctx context.Context, senderEmail string) error
+	CreateLabel(ctx context.Context, name string) (*Label, error)
+	DeleteLabel(ctx context.Context, id string) error
+	RenameLabel(ctx context.Context, id, newName string) error
 }
 
 type gmailClient struct {
@@ -136,7 +139,7 @@ func (c *gmailClient) GetMessage(ctx context.Context, id string) (*Message, erro
 
 // --- Write operations ---
 
-func buildMIMEMessage(to, cc, subject, htmlBody, plainBody, inReplyTo string, attachments []AttachmentFile) string {
+func buildMIMEMessage(to, cc, bcc, subject, htmlBody, plainBody, inReplyTo string, attachments []AttachmentFile) string {
 	altBoundary := "mailmd-alt-boundary"
 	var b strings.Builder
 
@@ -144,6 +147,9 @@ func buildMIMEMessage(to, cc, subject, htmlBody, plainBody, inReplyTo string, at
 	b.WriteString("To: " + to + "\r\n")
 	if cc != "" {
 		b.WriteString("Cc: " + cc + "\r\n")
+	}
+	if bcc != "" {
+		b.WriteString("Bcc: " + bcc + "\r\n")
 	}
 	b.WriteString("Subject: " + subject + "\r\n")
 	b.WriteString("MIME-Version: 1.0\r\n")
@@ -210,28 +216,28 @@ func writeAlternativeParts(b *strings.Builder, boundary, plainBody, htmlBody str
 	b.WriteString("--" + boundary + "--\r\n")
 }
 
-func buildRawMessage(to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) string {
-	msg := buildMIMEMessage(to, cc, subject, htmlBody, plainBody, "", attachments)
+func buildRawMessage(to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) string {
+	msg := buildMIMEMessage(to, cc, bcc, subject, htmlBody, plainBody, "", attachments)
 	return base64.URLEncoding.EncodeToString([]byte(msg))
 }
 
-func (c *gmailClient) SendMessage(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
-	raw := buildRawMessage(to, cc, subject, htmlBody, plainBody, attachments)
+func (c *gmailClient) SendMessage(ctx context.Context, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	raw := buildRawMessage(to, cc, bcc, subject, htmlBody, plainBody, attachments)
 	msg := &gapi.Message{Raw: raw}
 	_, err := c.svc.Users.Messages.Send(c.user, msg).Context(ctx).Do()
 	return err
 }
 
-func (c *gmailClient) ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
-	msg := buildMIMEMessage(to, cc, subject, htmlBody, plainBody, inReplyTo, attachments)
+func (c *gmailClient) ReplyMessage(ctx context.Context, threadID, inReplyTo, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	msg := buildMIMEMessage(to, cc, bcc, subject, htmlBody, plainBody, inReplyTo, attachments)
 	raw := base64.URLEncoding.EncodeToString([]byte(msg))
 	apiMsg := &gapi.Message{Raw: raw, ThreadId: threadID}
 	_, err := c.svc.Users.Messages.Send(c.user, apiMsg).Context(ctx).Do()
 	return err
 }
 
-func (c *gmailClient) CreateDraft(ctx context.Context, to, cc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
-	raw := buildRawMessage(to, cc, subject, htmlBody, plainBody, attachments)
+func (c *gmailClient) CreateDraft(ctx context.Context, to, cc, bcc, subject, htmlBody, plainBody string, attachments []AttachmentFile) error {
+	raw := buildRawMessage(to, cc, bcc, subject, htmlBody, plainBody, attachments)
 	draft := &gapi.Draft{
 		Message: &gapi.Message{Raw: raw},
 	}
@@ -249,7 +255,7 @@ func (c *gmailClient) ForwardMessage(ctx context.Context, messageID, to string) 
 	if original.HTMLBody != "" {
 		body = original.HTMLBody
 	}
-	return c.SendMessage(ctx, to, "", subject, body, original.Body, nil)
+	return c.SendMessage(ctx, to, "", "", subject, body, original.Body, nil)
 }
 
 func (c *gmailClient) TrashMessage(ctx context.Context, id string) error {
@@ -358,6 +364,29 @@ func (c *gmailClient) BlockSender(ctx context.Context, senderEmail string) error
 		},
 	}
 	_, err := c.svc.Users.Settings.Filters.Create(c.user, filter).Context(ctx).Do()
+	return err
+}
+
+func (c *gmailClient) CreateLabel(ctx context.Context, name string) (*Label, error) {
+	l := &gapi.Label{
+		Name:                    name,
+		LabelListVisibility:     "labelShow",
+		MessageListVisibility:   "show",
+	}
+	created, err := c.svc.Users.Labels.Create(c.user, l).Context(ctx).Do()
+	if err != nil {
+		return nil, err
+	}
+	return &Label{ID: created.Id, Name: created.Name}, nil
+}
+
+func (c *gmailClient) DeleteLabel(ctx context.Context, id string) error {
+	return c.svc.Users.Labels.Delete(c.user, id).Context(ctx).Do()
+}
+
+func (c *gmailClient) RenameLabel(ctx context.Context, id, newName string) error {
+	label := &gapi.Label{Name: newName}
+	_, err := c.svc.Users.Labels.Patch(c.user, id, label).Context(ctx).Do()
 	return err
 }
 

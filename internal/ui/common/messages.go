@@ -9,6 +9,7 @@ type OpenMessageMsg struct{ Message *gmail.Message }
 type ComposeMsg struct {
 	To          []string            // pre-populated recipients
 	CC          []string            // pre-populated CC
+	BCC         []string            // pre-populated BCC
 	Subject     string              // pre-populated subject
 	Body        string              // pre-populated body (quoted text for replies)
 	ThreadID    string              // Gmail thread ID for reply threading
@@ -29,6 +30,7 @@ type SendResultMsg struct{ Err error }
 type QueueSendMsg struct {
 	To          string
 	CC          string
+	BCC         string
 	Subject     string
 	HTMLBody    string
 	PlainBody   string
@@ -58,13 +60,20 @@ type FetchAndReplyMsg struct{ ID string }
 // TrashFromReaderMsg is sent when the user trashes/deletes a message from the reader view.
 type TrashFromReaderMsg struct{ ID string }
 
+// ArchiveFromReaderMsg is sent when the user archives a message from the reader view.
+type ArchiveFromReaderMsg struct{ ID string }
+
 // EditDraftMsg is sent when the user wants to edit a draft message.
 type EditDraftMsg struct{ ID string }
+
+// SendDraftMsg is sent when the user wants to send a draft directly.
+type SendDraftMsg struct{ ID string }
 
 // SaveDraftMsg is sent when the compose flow is canceled with content worth saving.
 type SaveDraftMsg struct {
 	To          string
 	CC          string
+	BCC         string
 	Subject     string
 	Body        string
 	Attachments []gmail.AttachmentFile
@@ -78,6 +87,7 @@ type DraftSavedMsg struct{ Err error }
 type EditHeadersMsg struct {
 	To          []string
 	CC          []string
+	BCC         []string
 	Subject     string
 	Body        string
 	ThreadID    string

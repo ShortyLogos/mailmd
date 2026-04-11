@@ -8,16 +8,24 @@ import (
 )
 
 type Account struct {
-	Name  string `toml:"name"`
-	Email string `toml:"email"`
+	Name      string `toml:"name"`
+	Email     string `toml:"email"`
+	Signature string `toml:"signature,omitempty"`
+}
+
+type Template struct {
+	Subject string `toml:"subject,omitempty"`
+	Body    string `toml:"body"`
 }
 
 type Config struct {
-	General       General     `toml:"general"`
-	Keybindings   Keybindings `toml:"keybindings"`
-	Preview       Preview     `toml:"preview"`
-	Accounts      []Account   `toml:"accounts"`
-	LastAccount   string      `toml:"last_account,omitempty"`
+	General       General              `toml:"general"`
+	Keybindings   Keybindings          `toml:"keybindings"`
+	Preview       Preview              `toml:"preview"`
+	Accounts      []Account            `toml:"accounts"`
+	LastAccount   string               `toml:"last_account,omitempty"`
+	ContactGroups map[string][]string   `toml:"contact_groups,omitempty"`
+	Templates     map[string]Template   `toml:"templates,omitempty"`
 }
 
 type General struct {

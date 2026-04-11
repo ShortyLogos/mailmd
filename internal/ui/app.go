@@ -63,6 +63,11 @@ type fetchDraftResultMsg struct {
 	err error
 }
 
+type fetchSendDraftResultMsg struct {
+	msg *gmail.Message
+	err error
+}
+
 type authResultMsg struct {
 	client gmail.Client
 	email  string
@@ -127,19 +132,31 @@ type App struct {
 	composeField        composeDialogField
 	composeTo           []string
 	composeCC           []string
+	composeBCC          []string
 	composeAttachments  []gmail.AttachmentFile
 	composeToInput      textinput.Model
 	composeCCInput      textinput.Model
+	composeBCCInput     textinput.Model
 	composeSubjectInput textinput.Model
 	composeAttInput     textinput.Model
 	composeSuggestions  []string
 	composeSuggCursor   int
+	composeSugLoading   bool
 	composeThreadID     string
 	composeInReplyTo    string
 	composeBody         string
 	composeDraftID      string
 	composeTitle        string
+	showCCField         bool
+	showBCCField        bool
+	showAttField        bool
 	contactCache        []string
+}
+
+// fileSuggestionsMsg carries async file path completion results.
+type fileSuggestionsMsg struct {
+	suggestions []string
+	query       string // the input that triggered this lookup
 }
 
 type composeDialogField int
@@ -147,6 +164,7 @@ type composeDialogField int
 const (
 	composeFieldTo composeDialogField = iota
 	composeFieldCC
+	composeFieldBCC
 	composeFieldSubject
 	composeFieldAttachments
 )
@@ -163,6 +181,10 @@ func New(opts AppOptions) App {
 	ccInput := textinput.New()
 	ccInput.Placeholder = "Type email address..."
 	ccInput.CharLimit = 256
+
+	bccInput := textinput.New()
+	bccInput.Placeholder = "Type email address..."
+	bccInput.CharLimit = 256
 
 	subjectInput := textinput.New()
 	subjectInput.Placeholder = "Subject..."
@@ -204,6 +226,7 @@ func New(opts AppOptions) App {
 		nameInput:           ti,
 		composeToInput:      toInput,
 		composeCCInput:      ccInput,
+		composeBCCInput:     bccInput,
 		composeSubjectInput: subjectInput,
 		composeAttInput:     attInput,
 		initialCompose:      opts.InitialCompose,
@@ -218,6 +241,37 @@ func (a App) Init() tea.Cmd {
 		cmds = append(cmds, func() tea.Msg { return msg })
 	}
 	return tea.Batch(cmds...)
+}
+
+// queueDraftSend converts a draft message and queues it for sending with undo.
+func (a *App) queueDraftSend(msg *gmail.Message) tea.Cmd {
+	htmlBody := msg.Body
+	plainBody := msg.Body
+	if msg.Body != "" {
+		if h, err := markdown.Convert(msg.Body); err == nil {
+			htmlBody = h
+		}
+		plainBody = markdown.ConvertPlain(msg.Body)
+	}
+	queueMsg := common.QueueSendMsg{
+		To:        msg.To,
+		CC:        msg.CC,
+		Subject:   msg.Subject,
+		HTMLBody:  htmlBody,
+		PlainBody: plainBody,
+		DraftID:   msg.ID,
+	}
+	return func() tea.Msg { return queueMsg }
+}
+
+// activeAccountSignature returns the signature for the current account, or empty string.
+func (a App) activeAccountSignature() string {
+	for _, acct := range a.cfg.Accounts {
+		if acct.Email == a.active.email {
+			return acct.Signature
+		}
+	}
+	return ""
 }
 
 // activeAccountName returns the display name for the current account.
@@ -294,7 +348,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.active.inbox.MarkRead(id)
 		if cached, ok := a.active.msgCache[id]; ok {
 			a.active.inbox.SetStatus("")
-			a.reader = reader.New(a.ctx, a.active.client, cached, a.width, a.height, a.active.inbox.TabIdx(), a.activeAccountName(), a.active.email)
+			a.reader = reader.New(a.ctx, a.active.client, cached, a.width, a.height, a.active.inbox.TabIdx(), a.active.inbox.FolderNames(), a.activeAccountName(), a.active.email)
 			a.screen = screenReader
 			return a, tea.Batch(a.reader.Init(), a.markAsRead(id))
 		}
@@ -312,7 +366,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		id := msg.ID
 		if cached, ok := a.active.msgCache[id]; ok {
 			cmd := a.openComposeDialog(
-				[]string{cached.From}, nil, "Re: "+cached.Subject,
+				[]string{cached.From}, nil, nil, "Re: "+cached.Subject,
 				quoteBodyText(cached.Body),
 				cached.ThreadID, cached.MessageID, "", "Reply", nil,
 			)
@@ -332,7 +386,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.active.msgCache[msg.msg.ID] = msg.msg
 		cmd := a.openComposeDialog(
-			[]string{msg.msg.From}, nil, "Re: "+msg.msg.Subject,
+			[]string{msg.msg.From}, nil, nil, "Re: "+msg.msg.Subject,
 			quoteBodyText(msg.msg.Body),
 			msg.msg.ThreadID, msg.msg.MessageID, "", "Reply", nil,
 		)
@@ -343,7 +397,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if cached, ok := a.active.msgCache[id]; ok {
 			to := splitAddresses(cached.To)
 			cc := splitAddresses(cached.CC)
-			cmd := a.openComposeDialog(to, cc, cached.Subject, cached.Body, "", "", id, "Edit Draft", nil)
+			cmd := a.openComposeDialog(to, cc, nil, cached.Subject, cached.Body, "", "", id, "Edit Draft", nil)
 			return a, cmd
 		}
 		a.active.inbox.SetLoadingStatus("Opening draft...")
@@ -356,6 +410,30 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.active.inbox.SpinnerTick(),
 		)
 
+	case common.SendDraftMsg:
+		id := msg.ID
+		if cached, ok := a.active.msgCache[id]; ok {
+			return a, a.queueDraftSend(cached)
+		}
+		a.active.inbox.SetLoadingStatus("Preparing to send...")
+		a.loading = true
+		return a, tea.Batch(
+			func() tea.Msg {
+				full, err := a.active.client.GetMessage(a.ctx, id)
+				return fetchSendDraftResultMsg{msg: full, err: err}
+			},
+			a.active.inbox.SpinnerTick(),
+		)
+
+	case fetchSendDraftResultMsg:
+		a.loading = false
+		if msg.err != nil {
+			a.active.inbox.SetStatus(fmt.Sprintf("Error: %v", msg.err))
+			return a, nil
+		}
+		a.active.msgCache[msg.msg.ID] = msg.msg
+		return a, a.queueDraftSend(msg.msg)
+
 	case fetchDraftResultMsg:
 		a.loading = false
 		if msg.err != nil {
@@ -365,7 +443,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.active.msgCache[msg.msg.ID] = msg.msg
 		to := splitAddresses(msg.msg.To)
 		cc := splitAddresses(msg.msg.CC)
-		cmd := a.openComposeDialog(to, cc, msg.msg.Subject, msg.msg.Body, "", "", msg.msg.ID, "Edit Draft", nil)
+		cmd := a.openComposeDialog(to, cc, nil, msg.msg.Subject, msg.msg.Body, "", "", msg.msg.ID, "Edit Draft", nil)
 		return a, cmd
 
 	case fetchMsgResultMsg:
@@ -377,12 +455,12 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		a.active.msgCache[msg.msg.ID] = msg.msg
 		a.active.inbox.MarkRead(msg.msg.ID)
-		a.reader = reader.New(a.ctx, a.active.client, msg.msg, a.width, a.height, a.active.inbox.TabIdx(), a.activeAccountName(), a.active.email)
+		a.reader = reader.New(a.ctx, a.active.client, msg.msg, a.width, a.height, a.active.inbox.TabIdx(), a.active.inbox.FolderNames(), a.activeAccountName(), a.active.email)
 		a.screen = screenReader
 		return a, tea.Batch(a.reader.Init(), a.markAsRead(msg.msg.ID))
 
 	case common.OpenMessageMsg:
-		a.reader = reader.New(a.ctx, a.active.client, msg.Message, a.width, a.height, a.active.inbox.TabIdx(), a.activeAccountName(), a.active.email)
+		a.reader = reader.New(a.ctx, a.active.client, msg.Message, a.width, a.height, a.active.inbox.TabIdx(), a.active.inbox.FolderNames(), a.activeAccountName(), a.active.email)
 		a.screen = screenReader
 		return a, a.reader.Init()
 
@@ -391,7 +469,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if title == "" {
 			title = "Compose"
 		}
-		cmd := a.openComposeDialog(msg.To, msg.CC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, title, msg.Attachments)
+		cmd := a.openComposeDialog(msg.To, msg.CC, msg.BCC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, title, msg.Attachments)
 		return a, cmd
 
 	case common.TrashFromReaderMsg:
@@ -419,9 +497,23 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return common.StatusMsg{Text: "Message trashed."}
 		})
 
+	case common.ArchiveFromReaderMsg:
+		a.screen = screenInbox
+		id := msg.ID
+		a.active.inbox.OptimisticRemove(id)
+		delete(a.active.msgCache, id)
+		a.active.inbox.SetStatus("Archiving message...")
+		return a, tea.Batch(a.active.inbox.SpinnerTick(), func() tea.Msg {
+			err := a.active.client.MoveMessage(a.ctx, id, nil, []string{"INBOX"})
+			if err != nil {
+				return common.StatusMsg{Text: "Error: " + err.Error()}
+			}
+			return common.StatusMsg{Text: "Message archived."}
+		})
+
 	case common.EditHeadersMsg:
 		a.screen = screenInbox
-		cmd := a.openComposeDialog(msg.To, msg.CC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, "Edit Headers", msg.Attachments)
+		cmd := a.openComposeDialog(msg.To, msg.CC, msg.BCC, msg.Subject, msg.Body, msg.ThreadID, msg.InReplyTo, msg.DraftID, "Edit Headers", msg.Attachments)
 		return a, cmd
 
 	case common.SaveDraftMsg:
@@ -450,7 +542,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					plainBody = markdown.ConvertPlain(msg.Body)
 				}
-				err := client.CreateDraft(ctx, msg.To, msg.CC, msg.Subject, htmlBody, plainBody, msg.Attachments)
+				err := client.CreateDraft(ctx, msg.To, msg.CC, msg.BCC, msg.Subject, htmlBody, plainBody, msg.Attachments)
 				return common.DraftSavedMsg{Err: err}
 			},
 		)
@@ -502,9 +594,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return a, func() tea.Msg {
 				var err error
 				if pending.ThreadID != "" {
-					err = client.ReplyMessage(ctx, pending.ThreadID, pending.InReplyTo, pending.To, pending.CC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
+					err = client.ReplyMessage(ctx, pending.ThreadID, pending.InReplyTo, pending.To, pending.CC, pending.BCC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
 				} else {
-					err = client.SendMessage(ctx, pending.To, pending.CC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
+					err = client.SendMessage(ctx, pending.To, pending.CC, pending.BCC, pending.Subject, pending.HTMLBody, pending.PlainBody, pending.Attachments)
 				}
 				if err != nil {
 					return common.SendResultMsg{Err: err}
@@ -540,6 +632,19 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			func() tea.Msg { return common.StatusMsg{Text: status} },
 		)
 
+	case fileSuggestionsMsg:
+		// Only apply if the compose dialog is still showing attachments
+		// and the query matches current input (avoid stale results)
+		if a.showComposeDialog && a.composeField == composeFieldAttachments {
+			current := a.composeAttInput.Value()
+			if current == msg.query {
+				a.composeSuggestions = msg.suggestions
+				a.composeSuggCursor = -1
+				a.composeSugLoading = false
+			}
+		}
+		return a, nil
+
 	case common.StatusMsg:
 		var cmd tea.Cmd
 		a.active.inbox, cmd = a.active.inbox.Update(msg)
@@ -560,7 +665,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-		if kmsg.String() == "K" {
+		if kmsg.String() == "K" && !a.active.inbox.IsInputActive() {
 			a.showHelp = true
 			return a, nil
 		}
@@ -1081,11 +1186,12 @@ func (a *App) contactsPath() string {
 	return filepath.Join(a.configDir, "mailmd", "contacts-"+safe+".json")
 }
 
-func (a *App) openComposeDialog(to, cc []string, subject, body, threadID, inReplyTo, draftID, title string, attachments []gmail.AttachmentFile) tea.Cmd {
+func (a *App) openComposeDialog(to, cc, bcc []string, subject, body, threadID, inReplyTo, draftID, title string, attachments []gmail.AttachmentFile) tea.Cmd {
 	a.showComposeDialog = true
 	a.composeField = composeFieldTo
 	a.composeTo = to
 	a.composeCC = cc
+	a.composeBCC = bcc
 	a.composeAttachments = attachments
 	a.composeBody = body
 	a.composeThreadID = threadID
@@ -1099,10 +1205,17 @@ func (a *App) openComposeDialog(to, cc []string, subject, body, threadID, inRepl
 	a.composeToInput.Focus()
 	a.composeCCInput.SetValue("")
 	a.composeCCInput.Blur()
+	a.composeBCCInput.SetValue("")
+	a.composeBCCInput.Blur()
 	a.composeSubjectInput.SetValue(subject)
 	a.composeSubjectInput.Blur()
 	a.composeAttInput.SetValue("")
 	a.composeAttInput.Blur()
+
+	// Show optional fields only if pre-populated
+	a.showCCField = len(cc) > 0
+	a.showBCCField = len(bcc) > 0
+	a.showAttField = len(attachments) > 0
 
 	a.contactCache = a.buildContactCache()
 
@@ -1182,6 +1295,17 @@ func (a *App) filterSuggestions(input string, exclude []string) []string {
 	}
 
 	var result []string
+
+	// Contact groups
+	for name, members := range a.cfg.ContactGroups {
+		if strings.Contains(strings.ToLower(name), lower) && len(members) > 0 {
+			result = append(result, fmt.Sprintf("group:%s (%d members)", name, len(members)))
+			if len(result) >= 5 {
+				return result
+			}
+		}
+	}
+
 	for _, addr := range a.contactCache {
 		email := extractEmail(addr)
 		if excludeSet[strings.ToLower(email)] {
@@ -1203,6 +1327,8 @@ func (a *App) composeDialogActiveInput() *textinput.Model {
 		return &a.composeToInput
 	case composeFieldCC:
 		return &a.composeCCInput
+	case composeFieldBCC:
+		return &a.composeBCCInput
 	case composeFieldAttachments:
 		return &a.composeAttInput
 	default:
@@ -1210,42 +1336,60 @@ func (a *App) composeDialogActiveInput() *textinput.Model {
 	}
 }
 
+// composeFieldOrder returns the active field sequence based on which optional fields are shown.
+func (a *App) composeFieldOrder() []composeDialogField {
+	order := []composeDialogField{composeFieldTo}
+	if a.showCCField {
+		order = append(order, composeFieldCC)
+	}
+	if a.showBCCField {
+		order = append(order, composeFieldBCC)
+	}
+	order = append(order, composeFieldSubject)
+	if a.showAttField {
+		order = append(order, composeFieldAttachments)
+	}
+	return order
+}
+
+func (a *App) composeDialogFocusField(field composeDialogField) {
+	a.composeToInput.Blur()
+	a.composeCCInput.Blur()
+	a.composeBCCInput.Blur()
+	a.composeSubjectInput.Blur()
+	a.composeAttInput.Blur()
+	a.composeField = field
+	a.composeDialogActiveInput().Focus()
+}
+
 func (a *App) composeDialogAdvanceField() {
-	switch a.composeField {
-	case composeFieldTo:
-		a.composeToInput.Blur()
-		a.composeField = composeFieldCC
-		a.composeCCInput.Focus()
-	case composeFieldCC:
-		a.composeCCInput.Blur()
-		a.composeField = composeFieldSubject
-		a.composeSubjectInput.Focus()
-	case composeFieldSubject:
-		a.composeSubjectInput.Blur()
-		a.composeField = composeFieldAttachments
-		a.composeAttInput.Focus()
+	order := a.composeFieldOrder()
+	for i, f := range order {
+		if f == a.composeField && i+1 < len(order) {
+			a.composeDialogFocusField(order[i+1])
+			break
+		}
 	}
 	a.composeSuggCursor = -1
 	a.composeSuggestions = nil
 }
 
 func (a *App) composeDialogRetreatField() {
-	switch a.composeField {
-	case composeFieldCC:
-		a.composeCCInput.Blur()
-		a.composeField = composeFieldTo
-		a.composeToInput.Focus()
-	case composeFieldSubject:
-		a.composeSubjectInput.Blur()
-		a.composeField = composeFieldCC
-		a.composeCCInput.Focus()
-	case composeFieldAttachments:
-		a.composeAttInput.Blur()
-		a.composeField = composeFieldSubject
-		a.composeSubjectInput.Focus()
+	order := a.composeFieldOrder()
+	for i, f := range order {
+		if f == a.composeField && i > 0 {
+			a.composeDialogFocusField(order[i-1])
+			break
+		}
 	}
 	a.composeSuggCursor = -1
 	a.composeSuggestions = nil
+}
+
+// composeDialogIsLastField returns true if the current field is the last in the order.
+func (a *App) composeDialogIsLastField() bool {
+	order := a.composeFieldOrder()
+	return len(order) > 0 && order[len(order)-1] == a.composeField
 }
 
 func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1255,32 +1399,75 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Save draft if there's content worth keeping
 		to := strings.Join(a.composeTo, ", ")
 		cc := strings.Join(a.composeCC, ", ")
+		bcc := strings.Join(a.composeBCC, ", ")
 		subject := a.composeSubjectInput.Value()
 		body := a.composeBody
 		atts := a.composeAttachments
 		if to != "" || body != "" {
 			return a, func() tea.Msg {
 				return common.SaveDraftMsg{
-					To: to, CC: cc, Subject: subject, Body: body,
+					To: to, CC: cc, BCC: bcc, Subject: subject, Body: body,
 					Attachments: atts,
 				}
 			}
 		}
 		return a, nil
 
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+t"))):
+		// Insert template — show template names as suggestions
+		if len(a.cfg.Templates) > 0 {
+			var names []string
+			for name := range a.cfg.Templates {
+				names = append(names, "tpl:"+name)
+			}
+			a.composeSuggestions = names
+			a.composeSuggCursor = 0
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
+		// Toggle CC field
+		if !a.showCCField {
+			a.showCCField = true
+			a.composeDialogFocusField(composeFieldCC)
+			a.composeSuggCursor = -1
+			a.composeSuggestions = nil
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+b"))):
+		// Toggle BCC field
+		if !a.showBCCField {
+			a.showBCCField = true
+			a.composeDialogFocusField(composeFieldBCC)
+			a.composeSuggCursor = -1
+			a.composeSuggestions = nil
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+a"))):
+		// Toggle Attachments field
+		if !a.showAttField {
+			a.showAttField = true
+			a.composeDialogFocusField(composeFieldAttachments)
+			a.composeSuggCursor = -1
+			a.composeSuggestions = nil
+		}
+		return a, nil
+
 	case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
-		// On To/CC: commit any typed text first
-		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+		// On To/CC/BCC: commit any typed text first
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC || a.composeField == composeFieldBCC {
 			a.commitComposeInput()
 		}
-		if a.composeField == composeFieldAttachments {
+		if a.composeDialogIsLastField() {
 			return a.launchComposeEditor()
 		}
 		a.composeDialogAdvanceField()
 		return a, nil
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab"))):
-		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC || a.composeField == composeFieldBCC {
 			a.commitComposeInput()
 		}
 		a.composeDialogRetreatField()
@@ -1288,6 +1475,9 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
 		if a.composeField == composeFieldSubject {
+			if a.composeDialogIsLastField() {
+				return a.launchComposeEditor()
+			}
 			a.composeDialogAdvanceField()
 			return a, nil
 		}
@@ -1311,8 +1501,7 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 						val += "/"
 					}
 					input.SetValue(val)
-					a.updateComposeSuggestions()
-					return a, nil
+					return a, a.updateComposeSuggestions()
 				}
 				// If file exists, add it
 				if _, err := os.Stat(val); err == nil {
@@ -1327,8 +1516,8 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return a, nil
 		}
-		// On To/CC: add typed text or selected suggestion
-		if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
+		// On To/CC/BCC: add typed text or selected suggestion
+		if a.composeField == composeFieldTo || a.composeField == composeFieldCC || a.composeField == composeFieldBCC {
 			input := a.composeDialogActiveInput()
 			val := strings.TrimSpace(input.Value())
 
@@ -1338,10 +1527,38 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 
 			if val != "" {
-				if a.composeField == composeFieldTo {
-					a.composeTo = append(a.composeTo, val)
-				} else {
-					a.composeCC = append(a.composeCC, val)
+				// Apply template
+				if strings.HasPrefix(val, "tpl:") {
+					tplName := strings.TrimPrefix(val, "tpl:")
+					if tpl, ok := a.cfg.Templates[tplName]; ok {
+						a.composeBody = tpl.Body
+						if tpl.Subject != "" {
+							a.composeSubjectInput.SetValue(tpl.Subject)
+						}
+					}
+					a.composeDialogActiveInput().SetValue("")
+					a.composeSuggCursor = -1
+					a.composeSuggestions = nil
+					return a, nil
+				}
+				// Expand contact group
+				var vals []string
+				if strings.HasPrefix(val, "group:") {
+					groupName := strings.SplitN(strings.TrimPrefix(val, "group:"), " (", 2)[0]
+					if members, ok := a.cfg.ContactGroups[groupName]; ok {
+						vals = members
+					}
+				}
+				if vals == nil {
+					vals = []string{val}
+				}
+				switch a.composeField {
+				case composeFieldTo:
+					a.composeTo = append(a.composeTo, vals...)
+				case composeFieldCC:
+					a.composeCC = append(a.composeCC, vals...)
+				case composeFieldBCC:
+					a.composeBCC = append(a.composeBCC, vals...)
 				}
 				input.SetValue("")
 				a.composeSuggCursor = -1
@@ -1350,7 +1567,7 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				// Empty input + enter: advance if we have recipients
 				if a.composeField == composeFieldTo && len(a.composeTo) > 0 {
 					a.composeDialogAdvanceField()
-				} else if a.composeField == composeFieldCC {
+				} else if a.composeField == composeFieldCC || a.composeField == composeFieldBCC {
 					a.composeDialogAdvanceField()
 				}
 			}
@@ -1365,6 +1582,8 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				a.composeTo = a.composeTo[:len(a.composeTo)-1]
 			} else if a.composeField == composeFieldCC && len(a.composeCC) > 0 {
 				a.composeCC = a.composeCC[:len(a.composeCC)-1]
+			} else if a.composeField == composeFieldBCC && len(a.composeBCC) > 0 {
+				a.composeBCC = a.composeBCC[:len(a.composeBCC)-1]
 			} else if a.composeField == composeFieldAttachments && len(a.composeAttachments) > 0 {
 				a.composeAttachments = a.composeAttachments[:len(a.composeAttachments)-1]
 			}
@@ -1373,8 +1592,8 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Let textinput handle backspace
 		var cmd tea.Cmd
 		*input, cmd = input.Update(msg)
-		a.updateComposeSuggestions()
-		return a, cmd
+		sugCmd := a.updateComposeSuggestions()
+		return a, tea.Batch(cmd, sugCmd)
 
 	case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
 		if len(a.composeSuggestions) > 0 {
@@ -1400,9 +1619,10 @@ func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	*input, cmd = input.Update(msg)
 
-	// Update suggestions after text change (only for To/CC fields)
-	if a.composeField == composeFieldTo || a.composeField == composeFieldCC {
-		a.updateComposeSuggestions()
+	// Update suggestions after text change
+	if a.composeField == composeFieldTo || a.composeField == composeFieldCC || a.composeField == composeFieldBCC || a.composeField == composeFieldAttachments {
+		sugCmd := a.updateComposeSuggestions()
+		return a, tea.Batch(cmd, sugCmd)
 	}
 	return a, cmd
 }
@@ -1413,34 +1633,46 @@ func (a *App) commitComposeInput() {
 	if val == "" {
 		return
 	}
-	if a.composeField == composeFieldTo {
+	switch a.composeField {
+	case composeFieldTo:
 		a.composeTo = append(a.composeTo, val)
-	} else if a.composeField == composeFieldCC {
+	case composeFieldCC:
 		a.composeCC = append(a.composeCC, val)
+	case composeFieldBCC:
+		a.composeBCC = append(a.composeBCC, val)
 	}
 	input.SetValue("")
 	a.composeSuggCursor = -1
 	a.composeSuggestions = nil
 }
 
-func (a *App) updateComposeSuggestions() {
+func (a *App) updateComposeSuggestions() tea.Cmd {
 	input := a.composeDialogActiveInput()
 	val := input.Value()
 
 	if a.composeField == composeFieldAttachments {
-		a.composeSuggestions = filterFileSuggestions(val)
+		a.composeSugLoading = true
+		a.composeSuggestions = nil
 		a.composeSuggCursor = -1
-		return
+		query := val
+		return func() tea.Msg {
+			return fileSuggestionsMsg{suggestions: filterFileSuggestions(query), query: query}
+		}
 	}
 
+	a.composeSugLoading = false
 	var exclude []string
-	if a.composeField == composeFieldTo {
+	switch a.composeField {
+	case composeFieldTo:
 		exclude = a.composeTo
-	} else {
+	case composeFieldCC:
 		exclude = a.composeCC
+	case composeFieldBCC:
+		exclude = a.composeBCC
 	}
 	a.composeSuggestions = a.filterSuggestions(val, exclude)
 	a.composeSuggCursor = -1
+	return nil
 }
 
 // filterFileSuggestions returns filesystem entries matching the typed path prefix.
@@ -1509,12 +1741,23 @@ func (a App) launchComposeEditor() (tea.Model, tea.Cmd) {
 
 	to := strings.Join(a.composeTo, ", ")
 	cc := strings.Join(a.composeCC, ", ")
+	bcc := strings.Join(a.composeBCC, ", ")
 	subject := a.composeSubjectInput.Value()
 
+	body := a.composeBody
+	// Append per-account signature if configured and body doesn't already contain it
+	sig := a.activeAccountSignature()
+	if sig != "" && !strings.Contains(body, sig) {
+		if body != "" {
+			body += "\n\n"
+		}
+		body += sig
+	}
+
 	a.composer = composer.NewWithMetadata(
-		a.ctx, a.active.client, a.cfg.Editor(), a.composeBody,
+		a.ctx, a.active.client, a.cfg.Editor(), body,
 		a.width, a.height,
-		to, cc, subject,
+		to, cc, bcc, subject,
 		a.composeThreadID, a.composeInReplyTo, a.composeDraftID,
 		a.composeAttachments,
 	)
@@ -1559,27 +1802,54 @@ func (a App) renderComposeOverlay(base string) string {
 		}
 	}
 
-	lines = append(lines, "")
+	// CC field (only shown when toggled)
+	if a.showCCField {
+		lines = append(lines, "")
+		ccLabel := labelStyle
+		if a.composeField == composeFieldCC {
+			ccLabel = activeLabel
+		}
+		ccLine := ccLabel.Render("CC: ")
+		if len(a.composeCC) > 0 {
+			ccLine += valueStyle.Render(strings.Join(a.composeCC, ", "))
+		} else if a.composeField != composeFieldCC {
+			ccLine += mutedStyle.Render("(none)")
+		}
+		lines = append(lines, ccLine)
+		if a.composeField == composeFieldCC {
+			lines = append(lines, "  "+a.composeCCInput.View())
+			for i, s := range a.composeSuggestions {
+				if i == a.composeSuggCursor {
+					lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+				} else {
+					lines = append(lines, "  "+mutedStyle.Render(s))
+				}
+			}
+		}
+	}
 
-	// CC field
-	ccLabel := labelStyle
-	if a.composeField == composeFieldCC {
-		ccLabel = activeLabel
-	}
-	ccLine := ccLabel.Render("CC: ")
-	if len(a.composeCC) > 0 {
-		ccLine += valueStyle.Render(strings.Join(a.composeCC, ", "))
-	} else if a.composeField != composeFieldCC {
-		ccLine += mutedStyle.Render("(none)")
-	}
-	lines = append(lines, ccLine)
-	if a.composeField == composeFieldCC {
-		lines = append(lines, "  "+a.composeCCInput.View())
-		for i, s := range a.composeSuggestions {
-			if i == a.composeSuggCursor {
-				lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
-			} else {
-				lines = append(lines, "  "+mutedStyle.Render(s))
+	// BCC field (only shown when toggled with ctrl+b)
+	if a.showBCCField {
+		lines = append(lines, "")
+		bccLabel := labelStyle
+		if a.composeField == composeFieldBCC {
+			bccLabel = activeLabel
+		}
+		bccLine := bccLabel.Render("BCC: ")
+		if len(a.composeBCC) > 0 {
+			bccLine += valueStyle.Render(strings.Join(a.composeBCC, ", "))
+		} else if a.composeField != composeFieldBCC {
+			bccLine += mutedStyle.Render("(none)")
+		}
+		lines = append(lines, bccLine)
+		if a.composeField == composeFieldBCC {
+			lines = append(lines, "  "+a.composeBCCInput.View())
+			for i, s := range a.composeSuggestions {
+				if i == a.composeSuggCursor {
+					lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+				} else {
+					lines = append(lines, "  "+mutedStyle.Render(s))
+				}
 			}
 		}
 	}
@@ -1603,30 +1873,37 @@ func (a App) renderComposeOverlay(base string) string {
 
 	lines = append(lines, "")
 
-	// Attachments field
-	attLabel := labelStyle
-	if a.composeField == composeFieldAttachments {
-		attLabel = activeLabel
-	}
-	attLine := attLabel.Render("Attach: ")
-	if len(a.composeAttachments) == 0 && a.composeField != composeFieldAttachments {
-		attLine += mutedStyle.Render("(none)")
-	}
-	lines = append(lines, attLine)
-	for _, att := range a.composeAttachments {
-		size := ""
-		if info, err := os.Stat(att.Path); err == nil {
-			size = formatFileSize(info.Size())
+	// Attachments field (only shown when toggled)
+	if a.showAttField {
+		lines = append(lines, "")
+		attLabel := labelStyle
+		if a.composeField == composeFieldAttachments {
+			attLabel = activeLabel
 		}
-		lines = append(lines, "  "+valueStyle.Render(filepath.Base(att.Path))+" "+mutedStyle.Render(size))
-	}
-	if a.composeField == composeFieldAttachments {
-		lines = append(lines, "  "+a.composeAttInput.View())
-		for i, s := range a.composeSuggestions {
-			if i == a.composeSuggCursor {
-				lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+		attLine := attLabel.Render("Attach: ")
+		if len(a.composeAttachments) == 0 && a.composeField != composeFieldAttachments {
+			attLine += mutedStyle.Render("(none)")
+		}
+		lines = append(lines, attLine)
+		for _, att := range a.composeAttachments {
+			size := ""
+			if info, err := os.Stat(att.Path); err == nil {
+				size = formatFileSize(info.Size())
+			}
+			lines = append(lines, "  "+valueStyle.Render(filepath.Base(att.Path))+" "+mutedStyle.Render(size))
+		}
+		if a.composeField == composeFieldAttachments {
+			lines = append(lines, "  "+a.composeAttInput.View())
+			if a.composeSugLoading {
+				lines = append(lines, "  "+mutedStyle.Render("Loading..."))
 			} else {
-				lines = append(lines, "  "+mutedStyle.Render(s))
+				for i, s := range a.composeSuggestions {
+					if i == a.composeSuggCursor {
+						lines = append(lines, suggHighlight.Render(padRight("  "+s, innerWidth)))
+					} else {
+						lines = append(lines, "  "+mutedStyle.Render(s))
+					}
+				}
 			}
 		}
 	}
@@ -1635,15 +1912,36 @@ func (a App) renderComposeOverlay(base string) string {
 
 	// Help
 	helpStyle := lipgloss.NewStyle().Foreground(common.Muted)
+
+	// Build toggle hints for hidden optional fields
+	var toggles string
+	if !a.showCCField {
+		toggles += "  ^o=CC"
+	}
+	if !a.showBCCField {
+		toggles += "  ^b=BCC"
+	}
+	if !a.showAttField {
+		toggles += "  ^a=attach"
+	}
+	if len(a.cfg.Templates) > 0 {
+		toggles += "  ^t=template"
+	}
+
 	switch a.composeField {
 	case composeFieldSubject:
-		lines = append(lines, helpStyle.Render("enter=next  tab=next  shift+tab=back  esc=cancel"))
+		if a.composeDialogIsLastField() {
+			lines = append(lines, helpStyle.Render("enter=open editor  tab=open editor"+toggles))
+		} else {
+			lines = append(lines, helpStyle.Render("enter=next  tab=next  shift+tab=back"+toggles))
+		}
+		lines = append(lines, helpStyle.Render("esc=cancel"))
 	case composeFieldAttachments:
 		lines = append(lines, helpStyle.Render("enter=add file  tab/enter(empty)=open editor"))
 		lines = append(lines, helpStyle.Render("shift+tab=back  backspace=remove  esc=cancel"))
 	default:
-		lines = append(lines, helpStyle.Render("enter=add  tab=next  shift+tab=back  esc=cancel"))
-		lines = append(lines, helpStyle.Render("backspace on empty=remove last"))
+		lines = append(lines, helpStyle.Render("enter=add  tab=next  shift+tab=back"+toggles))
+		lines = append(lines, helpStyle.Render("backspace on empty=remove last  esc=cancel"))
 	}
 
 	content := strings.Join(lines, "\n")

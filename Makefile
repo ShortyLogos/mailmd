@@ -6,6 +6,7 @@ LDFLAGS = -s -w -X main.version=$(VERSION)
 
 build:
 	go build -ldflags "$(LDFLAGS)" -o $(BINARY) ./cmd/mailmd
+	codesign -s - $(BINARY)
 
 run: build
 	./$(BINARY)

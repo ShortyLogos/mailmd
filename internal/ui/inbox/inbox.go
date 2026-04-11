@@ -23,7 +23,7 @@ type folder struct {
 	labelID string
 }
 
-var folders = []folder{
+var defaultFolders = []folder{
 	{name: "Inbox", labelID: "INBOX"},
 	{name: "Drafts", labelID: "DRAFT"},
 	{name: "Sent", labelID: "SENT"},
@@ -69,8 +69,48 @@ type toggleReadDoneMsg struct {
 // blockDoneMsg signals a block sender operation completed.
 type blockDoneMsg struct{ err error }
 
+// archiveDoneMsg signals an archive operation completed.
+type archiveDoneMsg struct {
+	err   error
+	count int
+}
+
+// starDoneMsg signals a star/unstar toggle completed.
+type starDoneMsg struct {
+	err      error
+	count    int
+	starred  bool
+}
+
 // pollTickMsg triggers a background refresh.
 type pollTickMsg struct{}
+
+// labelsLoadedMsg carries the result of fetching custom Gmail labels.
+type labelsLoadedMsg struct {
+	labels []gmail.Label
+	err    error
+}
+
+// labelCreatedMsg signals a new label was created via the API.
+type labelCreatedMsg struct {
+	label *gmail.Label
+	err   error
+	mode  int      // original picker mode to resume after creation
+	ids   []string // message IDs to tag (if mode was 1 or 2)
+}
+
+// labelDeletedMsg signals a label was deleted.
+type labelDeletedMsg struct {
+	labelID string
+	err     error
+}
+
+// labelRenamedMsg signals a label was renamed.
+type labelRenamedMsg struct {
+	labelID string
+	newName string
+	err     error
+}
 
 // attachmentEnrichMsg carries background attachment detection results.
 type attachmentEnrichMsg struct {
@@ -93,6 +133,8 @@ type folderCache struct {
 type Model struct {
 	ctx         context.Context
 	client      gmail.Client
+	folders     []folder
+	customLabels []folder   // user's Gmail labels (loaded async, shown in picker)
 	width       int
 	height      int
 	tabIdx      int
@@ -105,6 +147,20 @@ type Model struct {
 	attachmentCache map[string]bool // message ID → has attachments (persists across polls)
 	AccountName   string               // current account display name (shown in tab bar)
 	AccountEmail  string               // current account email (shown in tab bar)
+
+	// New mail tracking
+	lastInboxIDs map[string]bool  // message IDs from last inbox fetch
+	skipNextPoll bool             // skip one poll cycle after optimistic updates
+
+	// Label picker dialog
+	showLabelPicker    bool
+	labelPickerMode    int // 0 = browse folder, 1 = tag messages, 2 = move
+	labelPickerTagIDs  []string // message IDs to tag (mode 1/2)
+	labelPickerInput   textinput.Model
+	labelPickerCursor  int
+	labelPickerFiltered []int // indices into customLabels
+	labelRenaming      bool   // true when editing a label name inline
+	labelRenameInput   textinput.Model
 
 	// Search
 	searching   bool             // true when search input is visible
@@ -127,21 +183,32 @@ func New(ctx context.Context, client gmail.Client) Model {
 	ti.Placeholder = "Search Gmail (from:, subject:, has:attachment, ...)"
 	ti.CharLimit = 256
 
+	lpi := textinput.New()
+	lpi.Placeholder = "Filter labels..."
+	lpi.CharLimit = 128
+
+	lri := textinput.New()
+	lri.Placeholder = "New label name..."
+	lri.CharLimit = 128
+
 	return Model{
-		ctx:             ctx,
-		client:          client,
-		cache:           make(map[int]*folderCache),
-		attachmentCache: make(map[string]bool),
-		searchInput:     ti,
-		syncing:         true, // first load
-		spinner:         spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
+		ctx:              ctx,
+		client:           client,
+		folders:          append([]folder{}, defaultFolders...),
+		cache:            make(map[int]*folderCache),
+		attachmentCache:  make(map[string]bool),
+		searchInput:      ti,
+		labelPickerInput: lpi,
+		labelRenameInput: lri,
+		syncing:          true, // first load
+		spinner:          spinner.New(spinner.WithSpinner(spinner.Dot), spinner.WithStyle(common.SyncingStyle)),
 	}
 }
 
 // IsInputActive reports whether the inbox is capturing keyboard input
 // (search field or jump-to mode), so parent key handlers should not intercept.
 func (m Model) IsInputActive() bool {
-	return m.searching || m.jumping
+	return m.searching || m.jumping || m.showLabelPicker
 }
 
 // fc returns the active message cache — search results if searching, otherwise folder cache.
@@ -224,7 +291,14 @@ func (m *Model) selectedOrCursor(fc *folderCache) (ids []string, subjects []stri
 
 // Init loads messages for the default folder and starts polling.
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(m.fetchMessages(), m.pollTick(), m.spinner.Tick)
+	return tea.Batch(m.fetchMessages(), m.pollTick(), m.spinner.Tick, m.fetchLabels())
+}
+
+func (m Model) fetchLabels() tea.Cmd {
+	return func() tea.Msg {
+		labels, err := m.client.ListLabels(m.ctx)
+		return labelsLoadedMsg{labels: labels, err: err}
+	}
 }
 
 func (m Model) pollTick() tea.Cmd {
@@ -235,7 +309,7 @@ func (m Model) pollTick() tea.Cmd {
 
 func (m Model) fetchMessages() tea.Cmd {
 	tabIdx := m.tabIdx
-	labelID := folders[tabIdx].labelID
+	labelID := m.folders[tabIdx].labelID
 	query := ""
 	// Use the high-water mark so re-fetches don't shrink a list the user has scrolled through
 	var maxResults int64
@@ -252,7 +326,7 @@ func (m Model) fetchMessages() tea.Cmd {
 }
 
 func (m Model) fetchSearch(query string) tea.Cmd {
-	labelID := folders[m.tabIdx].labelID
+	labelID := m.folders[m.tabIdx].labelID
 	return func() tea.Msg {
 		list, err := m.client.ListMessages(m.ctx, labelID, query, "")
 		if err != nil {
@@ -277,7 +351,7 @@ func (m Model) maybePrefetch(fc *folderCache) tea.Cmd {
 }
 
 func (m Model) fetchMoreMessages(pageToken string) tea.Cmd {
-	labelID := folders[m.tabIdx].labelID
+	labelID := m.folders[m.tabIdx].labelID
 	// If searching, pass the active query and tag as search (tabIdx -1)
 	if m.searchQuery != "" {
 		query := m.searchQuery
@@ -346,6 +420,28 @@ func (m Model) trashMessages(ids []string) tea.Cmd {
 	}
 }
 
+func (m Model) toggleStarMessages(ids []string, star bool) tea.Cmd {
+	count := len(ids)
+	return func() tea.Msg {
+		var add, remove []string
+		if star {
+			add = []string{"STARRED"}
+		} else {
+			remove = []string{"STARRED"}
+		}
+		err := m.client.ModifyMessages(m.ctx, ids, add, remove)
+		return starDoneMsg{err: err, count: count, starred: star}
+	}
+}
+
+func (m Model) archiveMessages(ids []string) tea.Cmd {
+	count := len(ids)
+	return func() tea.Msg {
+		err := m.client.ModifyMessages(m.ctx, ids, nil, []string{"INBOX"})
+		return archiveDoneMsg{err: err, count: count}
+	}
+}
+
 func (m Model) toggleReadMessages(ids []string, markUnread bool) tea.Cmd {
 	count := len(ids)
 	return func() tea.Msg {
@@ -383,12 +479,21 @@ func (m *Model) optimisticRemove(fc *folderCache, ids []string) {
 
 // currentLabelID returns the label ID of the active folder.
 func (m Model) currentLabelID() string {
-	return folders[m.tabIdx].labelID
+	return m.folders[m.tabIdx].labelID
 }
 
 // TabIdx returns the active folder tab index.
 func (m Model) TabIdx() int {
 	return m.tabIdx
+}
+
+// FolderNames returns the display names of all folders for use in the reader tab bar.
+func (m Model) FolderNames() []string {
+	names := make([]string, len(m.folders))
+	for i, f := range m.folders {
+		names[i] = f.name
+	}
+	return names
 }
 
 // SpinnerTick returns the spinner's tick command to keep it animating.
@@ -410,7 +515,7 @@ func (m *Model) SetLoadingStatus(text string) {
 
 // CurrentLabelID returns the active folder's label ID.
 func (m Model) CurrentLabelID() string {
-	return folders[m.tabIdx].labelID
+	return m.folders[m.tabIdx].labelID
 }
 
 // OptimisticRemove removes a message by ID from the active folder cache.
@@ -522,9 +627,37 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.err = ""
 			}
 		}
-		// Fire background attachment enrichment
+		// Fire background attachment enrichment + new mail notification
 		if msg.err == nil && len(msg.messages) > 0 {
-			return m, m.enrichAttachments(msg.messages, msg.tabIdx)
+			cmds := []tea.Cmd{m.enrichAttachments(msg.messages, msg.tabIdx)}
+			// New mail notification for inbox tab
+			if m.folders[msg.tabIdx].labelID == "INBOX" && m.lastInboxIDs != nil {
+				newCount := 0
+				for _, newMsg := range msg.messages {
+					if newMsg.Unread && !m.lastInboxIDs[newMsg.ID] {
+						newCount++
+					}
+				}
+				if newCount > 0 {
+					var notifyText string
+					if newCount == 1 {
+						notifyText = "1 new message"
+					} else {
+						notifyText = fmt.Sprintf("%d new messages", newCount)
+					}
+					m.status = notifyText
+					// OSC 9 desktop notification (Ghostty, iTerm2, etc.) + BEL fallback
+					cmds = append(cmds, tea.Printf("\x1b]9;mailmd: %s\x1b\\\a", notifyText))
+				}
+			}
+			// Track inbox IDs
+			if m.folders[msg.tabIdx].labelID == "INBOX" {
+				m.lastInboxIDs = make(map[string]bool, len(msg.messages))
+				for _, newMsg := range msg.messages {
+					m.lastInboxIDs[newMsg.ID] = true
+				}
+			}
+			return m, tea.Batch(cmds...)
 		}
 
 	case moreMessagesMsg:
@@ -596,6 +729,29 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 		// Success: trust the optimistic removal, no re-fetch needed
 
+	case starDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+		}
+		// Invalidate Starred tab cache
+		for i, f := range m.folders {
+			if f.labelID == "STARRED" {
+				delete(m.cache, i)
+				break
+			}
+		}
+
+	case archiveDoneMsg:
+		if msg.err != nil {
+			m.status = "Error: " + msg.err.Error()
+			m.syncing = true
+			return m, m.fetchMessages()
+		} else if msg.count > 1 {
+			m.status = fmt.Sprintf("%d messages archived.", msg.count)
+		} else {
+			m.status = "Message archived."
+		}
+
 	case deleteDoneMsg:
 		if msg.err != nil {
 			m.status = "Error: " + msg.err.Error()
@@ -620,6 +776,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		}
 
 	case pollTickMsg:
+		if m.skipNextPoll {
+			m.skipNextPoll = false
+			return m, m.pollTick()
+		}
 		if m.searchQuery == "" {
 			m.syncing = true
 			return m, tea.Batch(m.fetchMessages(), m.pollTick())
@@ -631,6 +791,115 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			m.status = "Error: " + msg.err.Error()
 		} else {
 			m.status = "Sender blocked — future emails will be trashed."
+		}
+
+	case labelDeletedMsg:
+		if msg.err != nil {
+			m.status = "Error deleting label: " + msg.err.Error()
+			return m, nil
+		}
+		// Remove from customLabels
+		for i, l := range m.customLabels {
+			if l.labelID == msg.labelID {
+				m.customLabels = append(m.customLabels[:i], m.customLabels[i+1:]...)
+				break
+			}
+		}
+		// If we're viewing this label, switch back to inbox
+		for i, f := range m.folders {
+			if f.labelID == msg.labelID {
+				delete(m.cache, i)
+				if m.tabIdx == i {
+					m.tabIdx = 0
+					m.syncing = true
+					m.status = "Label deleted."
+					return m, m.fetchMessages()
+				}
+				break
+			}
+		}
+		m.status = "Label deleted."
+
+	case labelRenamedMsg:
+		if msg.err != nil {
+			m.status = "Error renaming label: " + msg.err.Error()
+			return m, nil
+		}
+		// Update in customLabels
+		for i, l := range m.customLabels {
+			if l.labelID == msg.labelID {
+				m.customLabels[i].name = msg.newName
+				break
+			}
+		}
+		// Update in folders if currently viewing
+		for i, f := range m.folders {
+			if f.labelID == msg.labelID {
+				m.folders[i].name = msg.newName
+				break
+			}
+		}
+		m.status = fmt.Sprintf("Label renamed to \"%s\".", msg.newName)
+
+	case labelCreatedMsg:
+		if msg.err != nil {
+			m.status = "Error creating label: " + msg.err.Error()
+			return m, nil
+		}
+		// Add to custom labels
+		newFolder := folder{name: msg.label.Name, labelID: msg.label.ID}
+		m.customLabels = append(m.customLabels, newFolder)
+
+		if msg.mode == 1 || msg.mode == 2 {
+			// Apply the new label to the tagged messages
+			ids := msg.ids
+			move := msg.mode == 2
+			if move {
+				fc := m.fc()
+				m.optimisticRemove(fc, ids)
+				m.skipNextPoll = true
+			}
+			m.status = fmt.Sprintf("Label \"%s\" created and applied.", msg.label.Name)
+			return m, func() tea.Msg {
+				add := []string{msg.label.ID}
+				var remove []string
+				if move {
+					remove = []string{"INBOX"}
+				}
+				err := m.client.ModifyMessages(m.ctx, ids, add, remove)
+				if err != nil {
+					return common.StatusMsg{Text: "Error: " + err.Error()}
+				}
+				return common.StatusMsg{Text: fmt.Sprintf("Label \"%s\" created and applied.", msg.label.Name)}
+			}
+		}
+
+		// Browse mode: open the new label as folder
+		labelSlot := len(defaultFolders)
+		if len(m.folders) > labelSlot {
+			m.folders[labelSlot] = newFolder
+		} else {
+			m.folders = append(m.folders, newFolder)
+		}
+		m.tabIdx = labelSlot
+		delete(m.cache, labelSlot)
+		m.searchQuery = ""
+		m.searchCache = nil
+		m.syncing = true
+		m.status = fmt.Sprintf("Label \"%s\" created.", msg.label.Name)
+		return m, m.fetchMessages()
+
+	case labelsLoadedMsg:
+		if msg.err == nil {
+			// User-created labels have IDs starting with "Label_".
+			// We also include STARRED and IMPORTANT since they're useful
+			// but don't need a permanent tab.
+			m.customLabels = nil
+			for _, l := range msg.labels {
+				if strings.HasPrefix(l.ID, "Label_") || l.ID == "STARRED" || l.ID == "IMPORTANT" {
+					m.customLabels = append(m.customLabels, folder{name: l.Name, labelID: l.ID})
+				}
+			}
 		}
 
 	case common.StatusMsg:
@@ -748,6 +1017,158 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 		}
 
+		// Label picker mode
+		if m.showLabelPicker {
+			// Rename sub-mode
+			if m.labelRenaming {
+				switch {
+				case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+					newName := strings.TrimSpace(m.labelRenameInput.Value())
+					if newName != "" && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+						chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+						m.labelRenaming = false
+						m.status = fmt.Sprintf("Renaming to \"%s\"...", newName)
+						return m, func() tea.Msg {
+							err := m.client.RenameLabel(m.ctx, chosen.labelID, newName)
+							return labelRenamedMsg{labelID: chosen.labelID, newName: newName, err: err}
+						}
+					}
+					m.labelRenaming = false
+					return m, nil
+				case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+					m.labelRenaming = false
+					return m, nil
+				default:
+					var cmd tea.Cmd
+					m.labelRenameInput, cmd = m.labelRenameInput.Update(msg)
+					return m, cmd
+				}
+			}
+
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.showLabelPicker = false
+				return m, nil
+
+			case key.Matches(msg, common.Keys.NextTab):
+				// Create new label from typed text
+				name := strings.TrimSpace(m.labelPickerInput.Value())
+				if name != "" {
+					mode := m.labelPickerMode
+					ids := m.labelPickerTagIDs
+					m.showLabelPicker = false
+					m.status = fmt.Sprintf("Creating label \"%s\"...", name)
+					return m, func() tea.Msg {
+						label, err := m.client.CreateLabel(m.ctx, name)
+						return labelCreatedMsg{label: label, err: err, mode: mode, ids: ids}
+					}
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				if len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+					m.showLabelPicker = false
+
+					if m.labelPickerMode == 1 || m.labelPickerMode == 2 {
+						ids := m.labelPickerTagIDs
+						m.labelPickerTagIDs = nil
+						move := m.labelPickerMode == 2
+						if move {
+							// Move: optimistically remove from current view
+							fc := m.fc()
+							m.optimisticRemove(fc, ids)
+							m.skipNextPoll = true
+							m.status = fmt.Sprintf("Moving to \"%s\"...", chosen.name)
+						} else {
+							m.status = fmt.Sprintf("Labeling as \"%s\"...", chosen.name)
+						}
+						return m, func() tea.Msg {
+							add := []string{chosen.labelID}
+							var remove []string
+							if move {
+								remove = []string{"INBOX"}
+							}
+							err := m.client.ModifyMessages(m.ctx, ids, add, remove)
+							if err != nil {
+								return common.StatusMsg{Text: "Error: " + err.Error()}
+							}
+							if move {
+								return common.StatusMsg{Text: fmt.Sprintf("Moved to \"%s\".", chosen.name)}
+							}
+							return common.StatusMsg{Text: fmt.Sprintf("Labeled as \"%s\".", chosen.name)}
+						}
+					}
+
+					// Browse mode: open label as folder
+					labelSlot := len(defaultFolders)
+					if len(m.folders) > labelSlot {
+						m.folders[labelSlot] = chosen
+					} else {
+						m.folders = append(m.folders, chosen)
+					}
+					m.tabIdx = labelSlot
+					delete(m.cache, labelSlot)
+					m.searchQuery = ""
+					m.searchCache = nil
+					m.syncing = true
+					return m, m.fetchMessages()
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("up"))):
+				if m.labelPickerCursor > 0 {
+					m.labelPickerCursor--
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("down"))):
+				if m.labelPickerCursor < len(m.labelPickerFiltered)-1 {
+					m.labelPickerCursor++
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d"))):
+				// Delete selected label (user-created only)
+				if m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+					if !strings.HasPrefix(chosen.labelID, "Label_") {
+						return m, nil // can't delete system labels
+					}
+					m.showLabelPicker = false
+					m.status = fmt.Sprintf("Deleting label \"%s\"...", chosen.name)
+					return m, func() tea.Msg {
+						err := m.client.DeleteLabel(m.ctx, chosen.labelID)
+						return labelDeletedMsg{labelID: chosen.labelID, err: err}
+					}
+				}
+				return m, nil
+
+			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+r"))):
+				// Rename selected label (user-created only)
+				if m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+					if !strings.HasPrefix(chosen.labelID, "Label_") {
+						return m, nil // can't rename system labels
+					}
+					m.labelRenaming = true
+					m.labelRenameInput.SetValue(chosen.name)
+					m.labelRenameInput.Focus()
+					m.labelPickerInput.Blur()
+				}
+				return m, nil
+
+			default:
+				var cmd tea.Cmd
+				m.labelPickerInput, cmd = m.labelPickerInput.Update(msg)
+				m.labelPickerFiltered = filterLabels(m.customLabels, m.labelPickerInput.Value())
+				if m.labelPickerCursor >= len(m.labelPickerFiltered) {
+					m.labelPickerCursor = 0
+				}
+				return m, cmd
+			}
+		}
+
 		fc := m.fc()
 
 		// Start jump mode on digit key press
@@ -786,7 +1207,12 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, common.Keys.NextTab):
-			m.tabIdx = (m.tabIdx + 1) % len(folders)
+			// Cycle through default folders only; remove custom label tab if present
+			nDefault := len(defaultFolders)
+			m.tabIdx = (m.tabIdx + 1) % nDefault
+			if len(m.folders) > len(defaultFolders) {
+				m.folders = m.folders[:len(defaultFolders)]
+			}
 			m.searchQuery = ""
 			m.searchCache = nil
 			m.searching = false
@@ -795,7 +1221,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, m.fetchMessages()
 
 		case key.Matches(msg, common.Keys.PrevTab):
-			m.tabIdx = (m.tabIdx - 1 + len(folders)) % len(folders)
+			nDefault := len(defaultFolders)
+			m.tabIdx = (m.tabIdx - 1 + nDefault) % nDefault
+			if len(m.folders) > len(defaultFolders) {
+				m.folders = m.folders[:len(defaultFolders)]
+			}
 			m.searchQuery = ""
 			m.searchCache = nil
 			m.searching = false
@@ -833,6 +1263,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			if m.currentLabelID() == "DRAFT" && len(fc.selected) == 0 && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
 				id := fc.messages[fc.cursor].ID
 				return m, func() tea.Msg { return common.EditDraftMsg{ID: id} }
+			}
+
+		case key.Matches(msg, common.Keys.Send):
+			// Send draft directly from inbox
+			if m.currentLabelID() == "DRAFT" && len(fc.selected) == 0 && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				id := fc.messages[fc.cursor].ID
+				return m, func() tea.Msg { return common.SendDraftMsg{ID: id} }
 			}
 
 		case key.Matches(msg, common.Keys.Reply):
@@ -970,6 +1407,95 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					}
 				}
 			}
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("L"))):
+			if len(m.customLabels) > 0 {
+				m.showLabelPicker = true
+				m.labelPickerMode = 0
+				m.labelPickerInput.SetValue("")
+				m.labelPickerInput.Focus()
+				m.labelPickerCursor = 0
+				m.labelPickerFiltered = filterLabels(m.customLabels, "")
+			}
+			return m, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("t"))):
+			if len(m.customLabels) > 0 {
+				ids, _ := m.selectedOrCursor(fc)
+				if len(ids) > 0 {
+					m.showLabelPicker = true
+					m.labelPickerMode = 1
+					m.labelPickerTagIDs = ids
+					m.labelPickerInput.SetValue("")
+					m.labelPickerInput.Focus()
+					m.labelPickerCursor = 0
+					m.labelPickerFiltered = filterLabels(m.customLabels, "")
+				}
+			}
+			return m, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("T"))):
+			if len(m.customLabels) > 0 {
+				ids, _ := m.selectedOrCursor(fc)
+				if len(ids) > 0 {
+					m.showLabelPicker = true
+					m.labelPickerMode = 2 // move = tag + archive
+					m.labelPickerTagIDs = ids
+					m.labelPickerInput.SetValue("")
+					m.labelPickerInput.Focus()
+					m.labelPickerCursor = 0
+					m.labelPickerFiltered = filterLabels(m.customLabels, "")
+				}
+			}
+			return m, nil
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("s"))):
+			if len(fc.messages) > 0 {
+				type target struct {
+					idx int
+					id  string
+				}
+				var targets []target
+				for i, msg := range fc.messages {
+					if fc.selected[msg.ID] {
+						targets = append(targets, target{i, msg.ID})
+					}
+				}
+				if len(targets) == 0 && fc.cursor < len(fc.messages) {
+					targets = []target{{fc.cursor, fc.messages[fc.cursor].ID}}
+				}
+				if len(targets) == 0 {
+					return m, nil
+				}
+				// Toggle based on first target's state
+				star := !fc.messages[targets[0].idx].Starred
+				var ids []string
+				for _, t := range targets {
+					fc.messages[t.idx].Starred = star
+					ids = append(ids, t.id)
+				}
+				if star {
+					m.status = "Starred"
+				} else {
+					m.status = "Unstarred"
+				}
+				return m, m.toggleStarMessages(ids, star)
+			}
+
+		case key.Matches(msg, common.Keys.Archive):
+			label := m.currentLabelID()
+			if label == "INBOX" {
+				ids, subjects := m.selectedOrCursor(fc)
+				if len(ids) > 0 {
+					m.optimisticRemove(fc, ids)
+					if len(ids) == 1 {
+						m.status = fmt.Sprintf("Archiving \"%s\"...", truncate(subjects[0], 40))
+					} else {
+						m.status = fmt.Sprintf("Archiving %d messages...", len(ids))
+					}
+					return m, m.archiveMessages(ids)
+				}
+			}
 		}
 	}
 	return m, nil
@@ -983,7 +1509,11 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 
 	base := " j/k=nav  space=select  a=all" + sel
 	label := m.currentLabelID()
-	suffix := "  f=search  R=refresh  tab=folder  K=keys  q=quit"
+	labelHint := ""
+	if len(m.customLabels) > 0 {
+		labelHint = "  L=labels"
+	}
+	suffix := "  f=search  R=refresh  tab=folder" + labelHint + "  K=keys  q=quit"
 
 	noSel := len(fc.selected) == 0
 
@@ -1005,7 +1535,7 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 	case "DRAFT":
 		extra := "  d=trash"
 		if noSel {
-			extra += "  e=edit"
+			extra += "  e=edit  y=send"
 		}
 		return base + extra + markHint + suffix
 	case "SENT":
@@ -1014,13 +1544,24 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 			extra += "  r=reply"
 		}
 		return base + extra + markHint + suffix
-	default: // INBOX
-		extra := "  d=trash  b=block"
+	default: // INBOX and custom labels
+		extra := "  s=star  t=label  T=move  A=archive  d=trash  b=block"
 		if noSel {
 			extra += "  r=reply"
 		}
 		return base + extra + markHint + suffix
 	}
+}
+
+func filterLabels(labels []folder, query string) []int {
+	lower := strings.ToLower(query)
+	var result []int
+	for i, l := range labels {
+		if lower == "" || strings.Contains(strings.ToLower(l.name), lower) {
+			result = append(result, i)
+		}
+	}
+	return result
 }
 
 func (m Model) contentHeight() int {
@@ -1044,8 +1585,8 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// 1. Tab bar at top
-	tabs := make([]string, len(folders))
-	for i, f := range folders {
+	tabs := make([]string, len(m.folders))
+	for i, f := range m.folders {
 		label := f.name
 		if f.labelID == "INBOX" {
 			if c := m.cache[i]; c != nil {
@@ -1290,7 +1831,117 @@ func (m Model) View() string {
 	// 6. Keybinds at bottom
 	b.WriteString(keybinds)
 
-	return b.String()
+	base := b.String()
+
+	// 7. Label picker overlay
+	if m.showLabelPicker {
+		return m.renderLabelPickerOverlay(base)
+	}
+
+	return base
+}
+
+func (m Model) renderLabelPickerOverlay(base string) string {
+	innerWidth := 44
+	maxItems := 10
+	var lines []string
+
+	titleText := "Labels"
+	switch m.labelPickerMode {
+	case 1:
+		titleText = "Apply Label"
+	case 2:
+		titleText = "Move to Label"
+	}
+	title := lipgloss.NewStyle().Bold(true).Foreground(common.Primary).Render(titleText)
+	lines = append(lines, title)
+	lines = append(lines, "")
+	lines = append(lines, m.labelPickerInput.View())
+	lines = append(lines, "")
+
+	highlight := lipgloss.NewStyle().Bold(true).Foreground(common.White).Background(common.Primary)
+	muted := lipgloss.NewStyle().Foreground(common.Muted)
+	arrowStyle := lipgloss.NewStyle().Foreground(common.Secondary)
+
+	total := len(m.labelPickerFiltered)
+	if total == 0 {
+		lines = append(lines, muted.Render("  (no matching labels)"))
+	} else {
+		// Compute visible window centered on cursor
+		start := m.labelPickerCursor - maxItems/2
+		if start < 0 {
+			start = 0
+		}
+		end := start + maxItems
+		if end > total {
+			end = total
+			start = end - maxItems
+			if start < 0 {
+				start = 0
+			}
+		}
+
+		if start > 0 {
+			lines = append(lines, arrowStyle.Render("  ▲ more"))
+		}
+		for i := start; i < end; i++ {
+			label := m.customLabels[m.labelPickerFiltered[i]].name
+			if i == m.labelPickerCursor {
+				lines = append(lines, highlight.Render(runewidthPadRight("  "+label, innerWidth)))
+			} else {
+				lines = append(lines, "  "+muted.Render(label))
+			}
+		}
+		if end < total {
+			lines = append(lines, arrowStyle.Render("  ▼ more"))
+		}
+	}
+
+	// Rename input (shown inline below the list when active)
+	if m.labelRenaming {
+		lines = append(lines, "")
+		renameLabel := lipgloss.NewStyle().Bold(true).Foreground(common.Primary).Render("Rename: ")
+		lines = append(lines, renameLabel+m.labelRenameInput.View())
+	}
+
+	lines = append(lines, "")
+	help := lipgloss.NewStyle().Foreground(common.Muted)
+	if m.labelRenaming {
+		lines = append(lines, help.Render("enter=save  esc=cancel"))
+	} else {
+		switch m.labelPickerMode {
+		case 1:
+			lines = append(lines, help.Render("enter=apply  tab=new  esc=cancel"))
+		case 2:
+			lines = append(lines, help.Render("enter=move  tab=new  esc=cancel"))
+		default:
+			// Dim rename/delete hints for system labels (STARRED, IMPORTANT)
+			canEdit := true
+			if len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+				chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+				canEdit = strings.HasPrefix(chosen.labelID, "Label_")
+			}
+			if canEdit {
+				lines = append(lines, help.Render("enter=open  tab=new  ^r=rename  ^d=delete  esc=cancel"))
+			} else {
+				dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
+				lines = append(lines, help.Render("enter=open  tab=new  ")+dim.Render("^r=rename  ^d=delete")+help.Render("  esc=cancel"))
+			}
+		}
+	}
+
+	content := strings.Join(lines, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(common.Secondary).
+		Padding(1, 2).
+		Width(innerWidth + 6).
+		Render(content)
+
+	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box,
+		lipgloss.WithWhitespaceChars(" "),
+		lipgloss.WithWhitespaceForeground(lipgloss.Color("#1F2937")))
 }
 
 func formatMessageLine(msg gmail.MessageSummary, width int) string {
@@ -1308,7 +1959,9 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 	}
 
 	unread := " "
-	if msg.Unread {
+	if msg.Starred {
+		unread = "★"
+	} else if msg.Unread {
 		unread = "●"
 	}
 
@@ -1321,13 +1974,14 @@ func formatMessageLine(msg gmail.MessageSummary, width int) string {
 
 	dateStr := ""
 	if !msg.Date.IsZero() {
+		local := msg.Date.Local()
 		now := time.Now()
-		if msg.Date.Year() == now.Year() && msg.Date.YearDay() == now.YearDay() {
-			dateStr = msg.Date.Format("15:04")
-		} else if msg.Date.Year() == now.Year() {
-			dateStr = msg.Date.Format("Jan 02")
+		if local.Year() == now.Year() && local.YearDay() == now.YearDay() {
+			dateStr = local.Format("15:04")
+		} else if local.Year() == now.Year() {
+			dateStr = local.Format("Jan 02")
 		} else {
-			dateStr = msg.Date.Format("Jan 06")
+			dateStr = local.Format("Jan 06")
 		}
 	}
 	dateStr = fmt.Sprintf("%*s", dateW, dateStr)

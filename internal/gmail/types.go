@@ -15,6 +15,7 @@ type MessageSummary struct {
 	Snippet        string
 	Date           time.Time
 	Unread         bool
+	Starred        bool
 	HasAttachments bool
 }
 

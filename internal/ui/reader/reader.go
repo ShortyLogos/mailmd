@@ -26,8 +26,6 @@ import (
 // attachmentOpenedMsg signals an attachment was saved and opened.
 type attachmentOpenedMsg struct{ err error }
 
-var folders = []string{"Inbox", "Drafts", "Sent", "Trash"}
-
 // Model is the reader Bubble Tea model.
 type Model struct {
 	ctx             context.Context
@@ -37,6 +35,7 @@ type Model struct {
 	width           int
 	height          int
 	ready           bool
+	folderNames     []string // folder names for tab bar display
 	tabIdx          int      // active folder tab (for display only)
 	accountName     string   // current account name (for tab bar)
 	accountEmail    string   // current account email (for tab bar)
@@ -53,13 +52,14 @@ type bodyRenderedMsg struct {
 	links   []string
 }
 
-func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int, accountName, accountEmail string) Model {
+func New(ctx context.Context, client gmail.Client, msg *gmail.Message, width, height, tabIdx int, folderNames []string, accountName, accountEmail string) Model {
 	m := Model{
 		ctx:          ctx,
 		client:       client,
 		message:      msg,
 		width:        width,
 		height:       height,
+		folderNames:  folderNames,
 		tabIdx:       tabIdx,
 		accountName:  accountName,
 		accountEmail: accountEmail,
@@ -93,6 +93,13 @@ func (m *Model) initViewport(content string) {
 
 
 // Init starts body rendering (lightweight, no Glamour).
+func (m Model) currentFolder() string {
+	if m.tabIdx >= 0 && m.tabIdx < len(m.folderNames) {
+		return m.folderNames[m.tabIdx]
+	}
+	return ""
+}
+
 func (m Model) Init() tea.Cmd {
 	return m.renderBody()
 }
@@ -899,15 +906,28 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 		case key.Matches(msg, common.Keys.Edit):
 			// Edit draft from reader
-			if m.message != nil && m.tabIdx == 1 { // 1 = Drafts
+			if m.message != nil && m.currentFolder() == "Drafts" {
 				id := m.message.ID
 				return m, func() tea.Msg { return common.EditDraftMsg{ID: id} }
+			}
+
+		case key.Matches(msg, common.Keys.Send):
+			// Send draft from reader
+			if m.message != nil && m.currentFolder() == "Drafts" {
+				id := m.message.ID
+				return m, func() tea.Msg { return common.SendDraftMsg{ID: id} }
 			}
 
 		case key.Matches(msg, common.Keys.Trash):
 			if m.message != nil {
 				id := m.message.ID
 				return m, func() tea.Msg { return common.TrashFromReaderMsg{ID: id} }
+			}
+
+		case key.Matches(msg, common.Keys.Archive):
+			if m.message != nil && m.currentFolder() == "Inbox" {
+				id := m.message.ID
+				return m, func() tea.Msg { return common.ArchiveFromReaderMsg{ID: id} }
 			}
 
 		case key.Matches(msg, common.Keys.Up):
@@ -962,8 +982,8 @@ func (m Model) View() string {
 	var b strings.Builder
 
 	// Tab bar
-	tabs := make([]string, len(folders))
-	for i, f := range folders {
+	tabs := make([]string, len(m.folderNames))
+	for i, f := range m.folderNames {
 		if i == m.tabIdx {
 			tabs[i] = common.ActiveTab.Render(f)
 		} else {
@@ -999,7 +1019,7 @@ func (m Model) View() string {
 	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("Subject: %s", truncVal(m.message.Subject))) + "\n")
 	dateStr := ""
 	if !m.message.Date.IsZero() {
-		dateStr = m.message.Date.Format("Mon, 02 Jan 2006 15:04:05 MST")
+		dateStr = m.message.Date.Local().Format("Mon, 02 Jan 2006 15:04:05 MST")
 	}
 	b.WriteString(common.ReaderHeader.Render(fmt.Sprintf("Date:    %s", dateStr)) + "\n")
 
@@ -1036,8 +1056,8 @@ func (m Model) View() string {
 		if len(m.message.Attachments) > 0 {
 			extras += "  N+enter=attach  I=images"
 		}
-		if m.tabIdx == 1 { // Drafts
-			status = " esc=back  e=edit  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
+		if m.currentFolder() == "Drafts" {
+			status = " esc=back  e=edit  y=send  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 		} else {
 			status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 		}

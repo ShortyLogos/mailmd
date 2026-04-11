@@ -8,7 +8,7 @@ import (
 )
 
 func TestBuildMIMEMessage(t *testing.T) {
-	mime := buildMIMEMessage("bob@example.com", "", "Test Subject", "<p>HTML</p>", "Plain text", "", nil)
+	mime := buildMIMEMessage("bob@example.com", "", "", "Test Subject", "<p>HTML</p>", "Plain text", "", nil)
 	if !strings.Contains(mime, "To: bob@example.com") {
 		t.Errorf("expected To header")
 	}
@@ -33,7 +33,7 @@ func TestBuildMIMEMessage(t *testing.T) {
 }
 
 func TestBuildMIMEMessageWithCC(t *testing.T) {
-	mime := buildMIMEMessage("bob@example.com", "carol@example.com", "Test Subject", "<p>HTML</p>", "Plain text", "", nil)
+	mime := buildMIMEMessage("bob@example.com", "carol@example.com", "", "Test Subject", "<p>HTML</p>", "Plain text", "", nil)
 	if !strings.Contains(mime, "Cc: carol@example.com") {
 		t.Errorf("expected Cc header, got: %s", mime)
 	}
@@ -41,7 +41,7 @@ func TestBuildMIMEMessageWithCC(t *testing.T) {
 
 func TestBuildReplyMessage(t *testing.T) {
 	msgID := "<CABx+abc123@mail.gmail.com>"
-	mime := buildMIMEMessage("bob@example.com", "", "Re: Test", "<p>Reply</p>", "Reply", msgID, nil)
+	mime := buildMIMEMessage("bob@example.com", "", "", "Re: Test", "<p>Reply</p>", "Reply", msgID, nil)
 	if !strings.Contains(mime, "In-Reply-To: "+msgID) {
 		t.Errorf("expected In-Reply-To header with Message-ID")
 	}
@@ -57,7 +57,7 @@ func TestBuildMIMEMessageWithAttachment(t *testing.T) {
 	os.WriteFile(path, []byte("hello world"), 0644)
 
 	attachments := []AttachmentFile{{Path: path}}
-	mime := buildMIMEMessage("bob@example.com", "", "Test", "<p>Hi</p>", "Hi", "", attachments)
+	mime := buildMIMEMessage("bob@example.com", "", "", "Test", "<p>Hi</p>", "Hi", "", attachments)
 
 	if !strings.Contains(mime, "multipart/mixed") {
 		t.Errorf("expected multipart/mixed with attachments")

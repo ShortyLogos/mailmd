@@ -13,11 +13,13 @@ import (
 func parseMessageSummary(msg *gapi.Message) MessageSummary {
 	headers := msg.Payload.Headers
 	date := parseDate(getHeader(headers, "Date"), msg.InternalDate)
-	unread := false
+	var unread, starred bool
 	for _, l := range msg.LabelIds {
-		if l == "UNREAD" {
+		switch l {
+		case "UNREAD":
 			unread = true
-			break
+		case "STARRED":
+			starred = true
 		}
 	}
 	return MessageSummary{
@@ -28,6 +30,7 @@ func parseMessageSummary(msg *gapi.Message) MessageSummary {
 		Snippet:        html.UnescapeString(msg.Snippet),
 		Date:           date,
 		Unread:         unread,
+		Starred:        starred,
 		HasAttachments: hasAttachments(msg.Payload),
 	}
 }
