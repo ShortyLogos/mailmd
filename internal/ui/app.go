@@ -3,8 +3,12 @@ package ui
 import (
 	"context"
 	"fmt"
+	"html"
+	"net/mail"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -12,7 +16,6 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"net/mail"
 
 	"github.com/deric/mailmd/internal/auth"
 	"github.com/deric/mailmd/internal/config"
@@ -58,6 +61,11 @@ type fetchReplyResultMsg struct {
 	err error
 }
 
+type fetchReplyAllResultMsg struct {
+	msg *gmail.Message
+	err error
+}
+
 type fetchDraftResultMsg struct {
 	msg *gmail.Message
 	err error
@@ -73,6 +81,10 @@ type authResultMsg struct {
 	email  string
 	name   string
 	err    error
+}
+
+type gmailSignatureImportedMsg struct {
+	html string
 }
 
 // --- Per-account state ---
@@ -126,6 +138,12 @@ type App struct {
 	editingAccount bool
 	nameInput      textinput.Model
 	authPending    bool
+
+	// Settings panel
+	showSettings      bool
+	settingsCursor    int
+	settingsNaming    bool // true when typing name for new signature
+	settingsNameInput textinput.Model
 
 	// Compose dialog
 	showComposeDialog   bool
@@ -194,6 +212,10 @@ func New(opts AppOptions) App {
 	attInput.Placeholder = "File path (tab to skip)..."
 	attInput.CharLimit = 512
 
+	settingsNameInput := textinput.New()
+	settingsNameInput.Placeholder = "Signature name..."
+	settingsNameInput.CharLimit = 64
+
 	state := &accountState{
 		email:    opts.ActiveEmail,
 		client:   opts.Client,
@@ -224,6 +246,7 @@ func New(opts AppOptions) App {
 		initted:             map[string]bool{opts.ActiveEmail: true},
 		screen:              screenInbox,
 		nameInput:           ti,
+		settingsNameInput:   settingsNameInput,
 		composeToInput:      toInput,
 		composeCCInput:      ccInput,
 		composeBCCInput:     bccInput,
@@ -272,6 +295,21 @@ func (a App) activeAccountSignature() string {
 		}
 	}
 	return ""
+}
+
+// activeAccount returns a mutable pointer to the active account in the config slice.
+func (a App) activeAccount() *config.Account {
+	for i := range a.cfg.Accounts {
+		if a.cfg.Accounts[i].Email == a.active.email {
+			return &a.cfg.Accounts[i]
+		}
+	}
+	return nil
+}
+
+// activeAccountConst is an alias for activeAccount for use in value-receiver methods.
+func (a App) activeAccountConst() *config.Account {
+	return a.activeAccount()
 }
 
 // activeAccountName returns the display name for the current account.
@@ -389,6 +427,38 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			[]string{msg.msg.From}, nil, nil, "Re: "+msg.msg.Subject,
 			quoteBodyText(msg.msg.Body),
 			msg.msg.ThreadID, msg.msg.MessageID, "", "Reply", nil,
+		)
+		return a, cmd
+
+	case common.FetchAndReplyAllMsg:
+		id := msg.ID
+		if cached, ok := a.active.msgCache[id]; ok {
+			to, cc := buildReplyAllRecipients(cached, a.active.email)
+			cmd := a.openComposeDialog(
+				to, cc, nil, "Re: "+cached.Subject,
+				quoteBodyText(cached.Body),
+				cached.ThreadID, cached.MessageID, "", "Reply All", nil,
+			)
+			return a, cmd
+		}
+		a.loading = true
+		return a, func() tea.Msg {
+			full, err := a.active.client.GetMessage(a.ctx, id)
+			return fetchReplyAllResultMsg{msg: full, err: err}
+		}
+
+	case fetchReplyAllResultMsg:
+		a.loading = false
+		if msg.err != nil {
+			a.active.inbox.SetStatus(fmt.Sprintf("Error: %v", msg.err))
+			return a, nil
+		}
+		a.active.msgCache[msg.msg.ID] = msg.msg
+		to, cc := buildReplyAllRecipients(msg.msg, a.active.email)
+		cmd := a.openComposeDialog(
+			to, cc, nil, "Re: "+msg.msg.Subject,
+			quoteBodyText(msg.msg.Body),
+			msg.msg.ThreadID, msg.msg.MessageID, "", "Reply All", nil,
 		)
 		return a, cmd
 
@@ -649,6 +719,42 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		a.active.inbox, cmd = a.active.inbox.Update(msg)
 		return a, cmd
+
+	case common.SignatureEditDoneMsg:
+		if msg.Err != nil {
+			a.active.inbox.SetStatus(fmt.Sprintf("Editor error: %v", msg.Err))
+			return a, nil
+		}
+		acct := a.activeAccount()
+		if acct != nil && a.settingsCursor < len(acct.Signatures) {
+			acct.Signatures[a.settingsCursor].Body = msg.Content
+			_ = config.Save(a.cfgPath, a.cfg)
+		}
+		return a, nil
+
+	case gmailSignatureImportedMsg:
+		acct := a.activeAccount()
+		if acct == nil {
+			return a, nil
+		}
+		plain := stripHTMLSimple(msg.html)
+		found := false
+		for i := range acct.Signatures {
+			if acct.Signatures[i].Name == "Gmail (imported)" {
+				acct.Signatures[i].Body = plain
+				found = true
+				break
+			}
+		}
+		if !found {
+			acct.Signatures = append(acct.Signatures, config.Signature{
+				Name: "Gmail (imported)",
+				Body: plain,
+			})
+		}
+		_ = config.Save(a.cfgPath, a.cfg)
+		a.active.inbox.SetStatus("Signature imported from Gmail")
+		return a, nil
 	}
 
 	// --- Key interception (before screen delegation) ---
@@ -673,6 +779,9 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if a.showComposeDialog {
 			return a.updateComposeDialog(kmsg)
 		}
+		if a.showSettings {
+			return a.updateSettings(kmsg)
+		}
 		if a.showSwitcher {
 			return a.updateSwitcher(kmsg)
 		}
@@ -682,6 +791,13 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			a.switcherCursor = 0
 			a.addingAccount = false
 			a.authPending = false
+			return a, nil
+		}
+		// , opens settings from inbox (only when not in search/jump/compose)
+		if a.screen == screenInbox && kmsg.String() == "," && !a.active.inbox.IsInputActive() {
+			a.showSettings = true
+			a.settingsCursor = 0
+			a.settingsNaming = false
 			return a, nil
 		}
 	}
@@ -837,6 +953,145 @@ func (a App) updateSwitcher(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
+// editSignatureInEditor opens the external editor with the signature body.
+func (a *App) editSignatureInEditor(idx int) tea.Cmd {
+	acct := a.activeAccount()
+	if acct == nil || idx >= len(acct.Signatures) {
+		return nil
+	}
+	body := acct.Signatures[idx].Body
+
+	f, err := os.CreateTemp("", "mailmd-sig-*.md")
+	if err != nil {
+		return func() tea.Msg { return common.SignatureEditDoneMsg{Err: err} }
+	}
+	if _, err := f.WriteString(body); err != nil {
+		f.Close()
+		os.Remove(f.Name())
+		return func() tea.Msg { return common.SignatureEditDoneMsg{Err: err} }
+	}
+	f.Close()
+
+	tmpPath := f.Name()
+	editorCmd := a.cfg.Editor()
+	cmd := exec.Command(editorCmd, tmpPath)
+	return tea.ExecProcess(cmd, func(err error) tea.Msg {
+		if err != nil {
+			os.Remove(tmpPath)
+			return common.SignatureEditDoneMsg{Err: err}
+		}
+		data, readErr := os.ReadFile(tmpPath)
+		os.Remove(tmpPath)
+		if readErr != nil {
+			return common.SignatureEditDoneMsg{Err: readErr}
+		}
+		return common.SignatureEditDoneMsg{Content: string(data)}
+	})
+}
+
+// updateSettings handles keys when the settings panel is open.
+func (a App) updateSettings(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// If naming a new signature, capture input
+	if a.settingsNaming {
+		switch {
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+			name := strings.TrimSpace(a.settingsNameInput.Value())
+			if name == "" {
+				a.settingsNaming = false
+				return a, nil
+			}
+			a.settingsNaming = false
+			acct := a.activeAccount()
+			if acct == nil {
+				return a, nil
+			}
+			acct.Signatures = append(acct.Signatures, config.Signature{Name: name})
+			a.settingsCursor = len(acct.Signatures) - 1
+			_ = config.Save(a.cfgPath, a.cfg)
+			return a, a.editSignatureInEditor(a.settingsCursor)
+
+		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+			a.settingsNaming = false
+			return a, nil
+		}
+		var cmd tea.Cmd
+		a.settingsNameInput, cmd = a.settingsNameInput.Update(msg)
+		return a, cmd
+	}
+
+	acct := a.activeAccount()
+	sigCount := 0
+	if acct != nil {
+		sigCount = len(acct.Signatures)
+	}
+
+	switch {
+	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+		a.showSettings = false
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("j", "down"))):
+		if a.settingsCursor < sigCount-1 {
+			a.settingsCursor++
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("k", "up"))):
+		if a.settingsCursor > 0 {
+			a.settingsCursor--
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("a"))):
+		a.settingsNaming = true
+		a.settingsNameInput.SetValue("")
+		a.settingsNameInput.Focus()
+		return a, textinput.Blink
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("e"))):
+		if acct != nil && a.settingsCursor < sigCount {
+			return a, a.editSignatureInEditor(a.settingsCursor)
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("d"))):
+		if acct != nil && a.settingsCursor < sigCount {
+			acct.Signatures = append(acct.Signatures[:a.settingsCursor], acct.Signatures[a.settingsCursor+1:]...)
+			if a.settingsCursor >= len(acct.Signatures) && a.settingsCursor > 0 {
+				a.settingsCursor--
+			}
+			_ = config.Save(a.cfgPath, a.cfg)
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("*"))):
+		if acct != nil && a.settingsCursor < sigCount {
+			for i := range acct.Signatures {
+				acct.Signatures[i].IsDefault = (i == a.settingsCursor)
+			}
+			_ = config.Save(a.cfgPath, a.cfg)
+		}
+		return a, nil
+
+	case key.Matches(msg, key.NewBinding(key.WithKeys("i"))):
+		if acct == nil {
+			return a, nil
+		}
+		return a, func() tea.Msg {
+			htmlSig, err := a.active.client.GetSendAsSignature(a.ctx)
+			if err != nil {
+				return common.StatusMsg{Text: fmt.Sprintf("Import failed: %v", err)}
+			}
+			if htmlSig == "" {
+				return common.StatusMsg{Text: "No signature found in Gmail"}
+			}
+			return gmailSignatureImportedMsg{html: htmlSig}
+		}
+	}
+
+	return a, nil
+}
+
 // switchToAccount switches to an existing account, using cache if available.
 func (a App) switchToAccount(acct config.Account) (tea.Model, tea.Cmd) {
 	if state, ok := a.states[acct.Email]; ok {
@@ -959,6 +1214,9 @@ func (a App) View() string {
 	if a.showComposeDialog {
 		return a.renderComposeOverlay(base)
 	}
+	if a.showSettings {
+		return a.renderSettingsOverlay(base)
+	}
 	if a.showSwitcher {
 		return a.renderSwitcherOverlay(base)
 	}
@@ -996,6 +1254,7 @@ func (a App) renderHelpOverlay(base string) string {
 		lines = append(lines, sectionStyle.Render("  Actions"))
 		lines = append(lines, bind("c", "Compose new email"))
 		lines = append(lines, bind("r", "Reply to message"))
+		lines = append(lines, bind("R", "Reply all"))
 		lines = append(lines, bind("e", "Edit draft (in Drafts)"))
 		lines = append(lines, bind("b", "Block sender (auto-trash)"))
 		lines = append(lines, bind("m", "Toggle read / unread"))
@@ -1005,7 +1264,7 @@ func (a App) renderHelpOverlay(base string) string {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("  Other"))
 		lines = append(lines, bind("f / /", "Search"))
-		lines = append(lines, bind("R", "Refresh"))
+		lines = append(lines, bind("ctrl+r", "Refresh"))
 		lines = append(lines, bind("p", "Toggle preview"))
 		lines = append(lines, bind("S", "Switch account"))
 		lines = append(lines, bind("K", "This help"))
@@ -1023,6 +1282,7 @@ func (a App) renderHelpOverlay(base string) string {
 		lines = append(lines, "")
 		lines = append(lines, sectionStyle.Render("  Actions"))
 		lines = append(lines, bind("r", "Reply"))
+		lines = append(lines, bind("R", "Reply all"))
 		lines = append(lines, bind("f", "Forward"))
 		lines = append(lines, bind("d", "Trash message"))
 		lines = append(lines, bind("P", "Open in browser"))
@@ -1136,6 +1396,90 @@ func padRight(s string, width int) string {
 	return s + strings.Repeat(" ", width-w)
 }
 
+// renderSettingsOverlay draws the account settings panel on top of the base view.
+func (a App) renderSettingsOverlay(base string) string {
+	innerWidth := 44
+	var lines []string
+
+	acctName := a.active.email
+	for _, acct := range a.cfg.Accounts {
+		if acct.Email == a.active.email && acct.Name != "" {
+			acctName = acct.Name
+			break
+		}
+	}
+
+	title := lipgloss.NewStyle().Bold(true).Foreground(common.Primary).
+		Render("Account Settings — " + acctName)
+	lines = append(lines, title)
+	lines = append(lines, "")
+
+	section := lipgloss.NewStyle().Bold(true).Foreground(common.White).Render("Signatures")
+	lines = append(lines, section)
+	lines = append(lines, "")
+
+	acct := a.activeAccountConst()
+	if acct == nil || len(acct.Signatures) == 0 {
+		lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render("  (no signatures)"))
+	} else {
+		for i, sig := range acct.Signatures {
+			prefix := "  "
+			if sig.IsDefault {
+				prefix = "* "
+			}
+			name := sig.Name
+			preview := strings.ReplaceAll(sig.Body, "\n", " ")
+			if len(preview) > 30 {
+				preview = preview[:30] + "..."
+			}
+
+			if i == a.settingsCursor {
+				nameStyle := lipgloss.NewStyle().Bold(true).Foreground(common.White).Background(common.Primary)
+				lines = append(lines, nameStyle.Render(padRight(prefix+name, innerWidth)))
+				if preview != "" {
+					lines = append(lines, "    "+lipgloss.NewStyle().Foreground(common.Muted).Render(preview))
+				}
+			} else {
+				lines = append(lines, prefix+lipgloss.NewStyle().Foreground(common.Accent).Render(name))
+				if preview != "" {
+					lines = append(lines, "    "+lipgloss.NewStyle().Foreground(common.Muted).Render(preview))
+				}
+			}
+		}
+	}
+
+	if a.settingsNaming {
+		lines = append(lines, "")
+		lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render("  Name: ")+a.settingsNameInput.View())
+	}
+
+	lines = append(lines, "")
+	help := "j/k  a=add  e=edit  d=delete  *=default  i=import  esc"
+	lines = append(lines, lipgloss.NewStyle().Foreground(common.Muted).Render(help))
+
+	content := strings.Join(lines, "\n")
+
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(common.Secondary).
+		Padding(1, 2)
+
+	rendered := box.Render(content)
+	return lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, rendered)
+}
+
+// stripHTMLSimple does a basic HTML-to-text conversion for signatures.
+func stripHTMLSimple(s string) string {
+	for _, tag := range []string{"<br>", "<br/>", "<br />", "<BR>", "<p>", "<P>", "<div>", "<DIV>"} {
+		s = strings.ReplaceAll(s, tag, "\n")
+	}
+	s = regexp.MustCompile(`</[^>]+>`).ReplaceAllString(s, "")
+	s = regexp.MustCompile(`<[^>]+>`).ReplaceAllString(s, "")
+	s = html.UnescapeString(s)
+	s = strings.TrimSpace(s)
+	return s
+}
+
 var undoSendStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#38BDF8")) // sky blue
 
 func undoSendStatus(seconds int) string {
@@ -1176,6 +1520,52 @@ func splitAddresses(s string) []string {
 		}
 	}
 	return result
+}
+
+func buildReplyAllRecipients(msg *gmail.Message, currentEmail string) (to, cc []string) {
+	currentLower := strings.ToLower(currentEmail)
+	seen := make(map[string]bool)
+	seen[currentLower] = true // exclude self
+
+	tryAdd := func(addr string) (string, bool) {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			return "", false
+		}
+		bare := extractEmail(addr)
+		key := strings.ToLower(bare)
+		if key == "" || seen[key] {
+			return "", false
+		}
+		seen[key] = true
+		return addr, true
+	}
+
+	// From → To (original sender goes first)
+	if addr, ok := tryAdd(msg.From); ok {
+		to = append(to, addr)
+	}
+
+	// Original To → To
+	for _, a := range splitAddresses(msg.To) {
+		if addr, ok := tryAdd(a); ok {
+			to = append(to, addr)
+		}
+	}
+
+	// Original CC → CC
+	for _, a := range splitAddresses(msg.CC) {
+		if addr, ok := tryAdd(a); ok {
+			cc = append(cc, addr)
+		}
+	}
+
+	// Fallback: ensure at least one recipient
+	if len(to) == 0 && len(cc) == 0 {
+		to = []string{msg.From}
+	}
+
+	return to, cc
 }
 
 // --- Compose dialog ---
