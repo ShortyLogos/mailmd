@@ -168,6 +168,8 @@ type App struct {
 	showCCField         bool
 	showBCCField        bool
 	showAttField        bool
+	composeSignatureIdx int  // index into account's Signatures (-1 for none)
+	showSigField        bool // show signature picker in compose dialog
 	contactCache        []string
 }
 
@@ -184,6 +186,7 @@ const (
 	composeFieldCC
 	composeFieldBCC
 	composeFieldSubject
+	composeFieldSignature
 	composeFieldAttachments
 )
 
@@ -1607,6 +1610,17 @@ func (a *App) openComposeDialog(to, cc, bcc []string, subject, body, threadID, i
 	a.showBCCField = len(bcc) > 0
 	a.showAttField = len(attachments) > 0
 
+	// Initialize signature selector to account default
+	acct := a.activeAccountConst()
+	if acct != nil && len(acct.Signatures) > 0 {
+		idx, _ := acct.DefaultSignature()
+		a.composeSignatureIdx = idx
+		a.showSigField = true
+	} else {
+		a.composeSignatureIdx = -1
+		a.showSigField = false
+	}
+
 	a.contactCache = a.buildContactCache()
 
 	return textinput.Blink
@@ -1736,6 +1750,9 @@ func (a *App) composeFieldOrder() []composeDialogField {
 		order = append(order, composeFieldBCC)
 	}
 	order = append(order, composeFieldSubject)
+	if a.showSigField {
+		order = append(order, composeFieldSignature)
+	}
 	if a.showAttField {
 		order = append(order, composeFieldAttachments)
 	}
@@ -1749,7 +1766,9 @@ func (a *App) composeDialogFocusField(field composeDialogField) {
 	a.composeSubjectInput.Blur()
 	a.composeAttInput.Blur()
 	a.composeField = field
-	a.composeDialogActiveInput().Focus()
+	if field != composeFieldSignature {
+		a.composeDialogActiveInput().Focus()
+	}
 }
 
 func (a *App) composeDialogAdvanceField() {
@@ -1783,6 +1802,46 @@ func (a *App) composeDialogIsLastField() bool {
 }
 
 func (a App) updateComposeDialog(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Signature field — selector, not text input
+	if a.composeField == composeFieldSignature {
+		acct := a.activeAccountConst()
+		sigCount := 0
+		if acct != nil {
+			sigCount = len(acct.Signatures)
+		}
+		switch {
+		case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
+			if a.composeSignatureIdx > -1 {
+				a.composeSignatureIdx--
+			}
+			return a, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
+			if a.composeSignatureIdx < sigCount-1 {
+				a.composeSignatureIdx++
+			}
+			return a, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
+			if a.composeDialogIsLastField() {
+				return a.launchComposeEditor()
+			}
+			a.composeDialogAdvanceField()
+			return a, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("shift+tab"))):
+			a.composeDialogRetreatField()
+			return a, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+			if a.composeDialogIsLastField() {
+				return a.launchComposeEditor()
+			}
+			a.composeDialogAdvanceField()
+			return a, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+			a.showComposeDialog = false
+			return a, nil
+		}
+		return a, nil
+	}
+
 	switch {
 	case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 		a.showComposeDialog = false
@@ -2263,6 +2322,29 @@ func (a App) renderComposeOverlay(base string) string {
 
 	lines = append(lines, "")
 
+	// Signature field (only shown when account has signatures)
+	if a.showSigField {
+		sigLabel := labelStyle
+		if a.composeField == composeFieldSignature {
+			sigLabel = activeLabel
+		}
+
+		sigName := "(none)"
+		acct := a.activeAccountConst()
+		if acct != nil && a.composeSignatureIdx >= 0 && a.composeSignatureIdx < len(acct.Signatures) {
+			sigName = acct.Signatures[a.composeSignatureIdx].Name
+		}
+
+		if a.composeField == composeFieldSignature {
+			lines = append(lines, sigLabel.Render("Signature: ")+valueStyle.Render("< "+sigName+" >")+
+				"  "+mutedStyle.Render("↑/↓"))
+		} else {
+			lines = append(lines, sigLabel.Render("Signature: ")+mutedStyle.Render(sigName))
+		}
+
+		lines = append(lines, "")
+	}
+
 	// Attachments field (only shown when toggled)
 	if a.showAttField {
 		lines = append(lines, "")
@@ -2324,6 +2406,13 @@ func (a App) renderComposeOverlay(base string) string {
 			lines = append(lines, helpStyle.Render("enter=open editor  tab=open editor"+toggles))
 		} else {
 			lines = append(lines, helpStyle.Render("enter=next  tab=next  shift+tab=back"+toggles))
+		}
+		lines = append(lines, helpStyle.Render("esc=cancel"))
+	case composeFieldSignature:
+		if a.composeDialogIsLastField() {
+			lines = append(lines, helpStyle.Render("↑/↓=change  enter/tab=open editor"+toggles))
+		} else {
+			lines = append(lines, helpStyle.Render("↑/↓=change  enter/tab=next  shift+tab=back"+toggles))
 		}
 		lines = append(lines, helpStyle.Render("esc=cancel"))
 	case composeFieldAttachments:
