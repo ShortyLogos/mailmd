@@ -57,6 +57,10 @@ type FetchMessageMsg struct{ ID string }
 // The app shell fetches the full message, then opens the compose flow with a reply template.
 type FetchAndReplyMsg struct{ ID string }
 
+// FetchAndReplyAllMsg is sent when the inbox wants to reply-all to a message directly.
+// The app shell fetches the full message, then opens the compose flow with all recipients.
+type FetchAndReplyAllMsg struct{ ID string }
+
 // TrashFromReaderMsg is sent when the user trashes/deletes a message from the reader view.
 type TrashFromReaderMsg struct{ ID string }
 
@@ -94,4 +98,10 @@ type EditHeadersMsg struct {
 	InReplyTo   string
 	DraftID     string
 	Attachments []gmail.AttachmentFile
+}
+
+// SignatureEditDoneMsg is sent when the external editor returns after editing a signature.
+type SignatureEditDoneMsg struct {
+	Content string
+	Err     error
 }
