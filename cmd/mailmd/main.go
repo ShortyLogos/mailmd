@@ -116,6 +116,7 @@ INBOX
   shift+tab          Previous folder
   c                  Compose new email
   r                  Reply to message
+  R                  Reply all
   e                  Edit draft (in Drafts folder)
   s                  Toggle star
   t                  Apply label to message
@@ -127,10 +128,11 @@ INBOX
   space              Select message
   a                  Select / deselect all
   f / /              Search
-  R                  Refresh
+  ctrl+r             Refresh
   p                  Toggle preview pane
   L                  Browse labels (custom Gmail labels)
   S                  Switch account
+  ,                  Account settings (signatures)
   K                  Show keybindings help
   q / ctrl+c         Quit
 
@@ -139,6 +141,7 @@ READER
   k / ↑              Scroll up
   esc / h            Back to inbox
   r                  Reply
+  R                  Reply all
   f                  Forward
   A                  Archive message (in Inbox)
   d                  Trash message
@@ -185,16 +188,23 @@ Add a signature per account. It's appended as Markdown when composing.
   [[accounts]]
   name = "Work"
   email = "alice@work.com"
-  signature = """
+
+  [[accounts.signatures]]
+  name = "Formal"
+  body = """
   ---
   **Alice Smith** | Engineering
   alice@work.com | (555) 123-4567
   """
+  is_default = true
+
+  [[accounts.signatures]]
+  name = "Casual"
+  body = "— Alice"
 
   [[accounts]]
   name = "Personal"
   email = "alice@gmail.com"
-  signature = "— Alice"
 
 TEMPLATES
 

@@ -1270,6 +1270,7 @@ func (a App) renderHelpOverlay(base string) string {
 		lines = append(lines, bind("ctrl+r", "Refresh"))
 		lines = append(lines, bind("p", "Toggle preview"))
 		lines = append(lines, bind("S", "Switch account"))
+		lines = append(lines, bind(",", "Account settings"))
 		lines = append(lines, bind("K", "This help"))
 		lines = append(lines, bind("q / ctrl+c", "Quit"))
 
