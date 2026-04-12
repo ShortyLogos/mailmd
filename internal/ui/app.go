@@ -290,14 +290,14 @@ func (a *App) queueDraftSend(msg *gmail.Message) tea.Cmd {
 	return func() tea.Msg { return queueMsg }
 }
 
-// activeAccountSignature returns the signature for the current account, or empty string.
-func (a App) activeAccountSignature() string {
-	for _, acct := range a.cfg.Accounts {
-		if acct.Email == a.active.email {
-			return acct.Signature
-		}
+// activeComposeSignature returns the signature body for the currently selected
+// compose signature index, or empty string if none selected.
+func (a App) activeComposeSignature() string {
+	acct := a.activeAccountConst()
+	if acct == nil || a.composeSignatureIdx < 0 || a.composeSignatureIdx >= len(acct.Signatures) {
+		return ""
 	}
-	return ""
+	return acct.Signatures[a.composeSignatureIdx].Body
 }
 
 // activeAccount returns a mutable pointer to the active account in the config slice.
@@ -2195,7 +2195,7 @@ func (a App) launchComposeEditor() (tea.Model, tea.Cmd) {
 
 	body := a.composeBody
 	// Append per-account signature if configured and body doesn't already contain it
-	sig := a.activeAccountSignature()
+	sig := a.activeComposeSignature()
 	if sig != "" && !strings.Contains(body, sig) {
 		if body != "" {
 			body += "\n\n"
