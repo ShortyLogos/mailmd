@@ -3,10 +3,10 @@ package common
 import "github.com/charmbracelet/bubbles/key"
 
 type KeyMap struct {
-	Up, Down, Open, Back, Compose, Reply, Forward, Trash    key.Binding
+	Up, Down, Open, Back, Compose, Reply, ReplyAll, Forward, Trash key.Binding
 	Preview, BPreview, NextTab, PrevTab, Send, Edit          key.Binding
 	Refresh, Restore, Select, SelectAll, Quit, Help          key.Binding
-	Home, End, Archive                                       key.Binding
+	Home, End, Archive, Settings                             key.Binding
 }
 
 var Keys = KeyMap{
@@ -16,6 +16,7 @@ var Keys = KeyMap{
 	Back:     key.NewBinding(key.WithKeys("esc", "backspace", "left", "h"), key.WithHelp("esc", "back")),
 	Compose:  key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "compose")),
 	Reply:    key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "reply")),
+	ReplyAll: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "reply all")),
 	Forward:  key.NewBinding(key.WithKeys("f"), key.WithHelp("f", "forward")),
 	Trash:    key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "trash")),
 	Preview:  key.NewBinding(key.WithKeys("p"), key.WithHelp("p", "preview")),
@@ -24,7 +25,7 @@ var Keys = KeyMap{
 	PrevTab:  key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("shift+tab", "prev folder")),
 	Send:     key.NewBinding(key.WithKeys("y"), key.WithHelp("y", "send")),
 	Edit:     key.NewBinding(key.WithKeys("e"), key.WithHelp("e", "edit")),
-	Refresh:  key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh")),
+	Refresh:  key.NewBinding(key.WithKeys("ctrl+r"), key.WithHelp("ctrl+r", "refresh")),
 	Restore:   key.NewBinding(key.WithKeys("u"), key.WithHelp("u", "restore")),
 	Select:    key.NewBinding(key.WithKeys(" "), key.WithHelp("space", "select")),
 	SelectAll: key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "select all")),
@@ -33,4 +34,5 @@ var Keys = KeyMap{
 	Home:     key.NewBinding(key.WithKeys("home", "pgup"), key.WithHelp("Home", "top")),
 	End:      key.NewBinding(key.WithKeys("end", "pgdown"), key.WithHelp("End", "bottom")),
 	Archive:  key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "archive")),
+	Settings: key.NewBinding(key.WithKeys(","), key.WithHelp(",", "settings")),
 }

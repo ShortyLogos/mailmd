@@ -84,3 +84,29 @@ func TestEditorFallback(t *testing.T) {
 		t.Errorf("expected 'nvim', got %q", editor)
 	}
 }
+
+func TestMigrateSignatures(t *testing.T) {
+	cfg := Config{
+		Accounts: []Account{
+			{Name: "Test", Email: "a@b.com", Signature: "-- old sig"},
+			{Name: "NoSig", Email: "c@d.com"},
+		},
+	}
+	migrated := migrateSignatures(&cfg)
+	if !migrated {
+		t.Fatal("expected migration")
+	}
+	if cfg.Accounts[0].Signature != "" {
+		t.Error("old signature field should be cleared")
+	}
+	if len(cfg.Accounts[0].Signatures) != 1 {
+		t.Fatal("expected 1 signature")
+	}
+	sig := cfg.Accounts[0].Signatures[0]
+	if sig.Name != "Default" || sig.Body != "-- old sig" || !sig.IsDefault {
+		t.Errorf("unexpected signature: %+v", sig)
+	}
+	if len(cfg.Accounts[1].Signatures) != 0 {
+		t.Error("account without signature should stay empty")
+	}
+}

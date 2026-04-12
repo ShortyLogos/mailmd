@@ -39,6 +39,7 @@ type Client interface {
 	GetAttachment(ctx context.Context, messageID, attachmentID string) ([]byte, error)
 	CheckAttachments(ctx context.Context, ids []string) (map[string]bool, error)
 	GetProfile(ctx context.Context) (string, error)
+	GetSendAsSignature(ctx context.Context) (string, error)
 	BlockSender(ctx context.Context, senderEmail string) error
 	CreateLabel(ctx context.Context, name string) (*Label, error)
 	DeleteLabel(ctx context.Context, id string) error
@@ -396,4 +397,17 @@ func (c *gmailClient) GetProfile(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return profile.EmailAddress, nil
+}
+
+func (c *gmailClient) GetSendAsSignature(ctx context.Context) (string, error) {
+	resp, err := c.svc.Users.Settings.SendAs.List(c.user).Context(ctx).Do()
+	if err != nil {
+		return "", fmt.Errorf("failed to list SendAs aliases: %w", err)
+	}
+	for _, alias := range resp.SendAs {
+		if alias.IsPrimary {
+			return alias.Signature, nil // HTML string
+		}
+	}
+	return "", nil
 }

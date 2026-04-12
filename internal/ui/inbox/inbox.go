@@ -1293,6 +1293,13 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, func() tea.Msg { return common.FetchAndReplyMsg{ID: id} }
 			}
 
+		case key.Matches(msg, common.Keys.ReplyAll):
+			// Quick reply-all from inbox — only when no multi-select
+			if len(fc.selected) == 0 && len(fc.messages) > 0 && fc.cursor < len(fc.messages) {
+				id := fc.messages[fc.cursor].ID
+				return m, func() tea.Msg { return common.FetchAndReplyAllMsg{ID: id} }
+			}
+
 		case key.Matches(msg, common.Keys.Compose):
 			return m, func() tea.Msg { return common.ComposeMsg{Title: "Compose"} }
 
@@ -1527,7 +1534,7 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 	if len(m.customLabels) > 0 {
 		labelHint = "  L=labels"
 	}
-	suffix := "  f=search  R=refresh  tab=folder" + labelHint + "  K=keys  q=quit"
+	suffix := "  f=search  R=reply all  ctrl+r=refresh  ,=settings  tab=folder" + labelHint + "  K=keys  q=quit"
 
 	noSel := len(fc.selected) == 0
 

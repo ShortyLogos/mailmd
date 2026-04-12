@@ -7,10 +7,17 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-type Account struct {
+type Signature struct {
 	Name      string `toml:"name"`
-	Email     string `toml:"email"`
-	Signature string `toml:"signature,omitempty"`
+	Body      string `toml:"body"`
+	IsDefault bool   `toml:"is_default,omitempty"`
+}
+
+type Account struct {
+	Name       string      `toml:"name"`
+	Email      string      `toml:"email"`
+	Signature  string      `toml:"signature,omitempty"`  // deprecated, migrated on load
+	Signatures []Signature `toml:"signatures,omitempty"`
 }
 
 type Template struct {
@@ -78,6 +85,9 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	cfg.Accounts = deduplicateAccounts(cfg.Accounts)
+	if migrateSignatures(&cfg) {
+		_ = save(path, cfg) // persist migration, ignore error
+	}
 	return cfg, nil
 }
 
@@ -94,6 +104,38 @@ func deduplicateAccounts(accounts []Account) []Account {
 		}
 	}
 	return result
+}
+
+// migrateSignatures converts old single Signature field to Signatures slice.
+// Returns true if any migration occurred.
+func migrateSignatures(cfg *Config) bool {
+	migrated := false
+	for i := range cfg.Accounts {
+		acct := &cfg.Accounts[i]
+		if acct.Signature != "" && len(acct.Signatures) == 0 {
+			acct.Signatures = []Signature{{
+				Name:      "Default",
+				Body:      acct.Signature,
+				IsDefault: true,
+			}}
+			acct.Signature = ""
+			migrated = true
+		}
+	}
+	return migrated
+}
+
+// DefaultSignature returns the index and body of the default signature, or (-1, "") if none.
+func (a Account) DefaultSignature() (int, string) {
+	for i, s := range a.Signatures {
+		if s.IsDefault {
+			return i, s.Body
+		}
+	}
+	if len(a.Signatures) > 0 {
+		return 0, a.Signatures[0].Body
+	}
+	return -1, ""
 }
 
 func LoadOrCreate(path string) (Config, error) {
