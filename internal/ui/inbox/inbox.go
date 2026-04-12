@@ -3,6 +3,7 @@ package inbox
 import (
 	"context"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -632,22 +633,35 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			cmds := []tea.Cmd{m.enrichAttachments(msg.messages, msg.tabIdx)}
 			// New mail notification for inbox tab
 			if m.folders[msg.tabIdx].labelID == "INBOX" && m.lastInboxIDs != nil {
-				newCount := 0
+				var newMsgs []gmail.MessageSummary
 				for _, newMsg := range msg.messages {
 					if newMsg.Unread && !m.lastInboxIDs[newMsg.ID] {
-						newCount++
+						newMsgs = append(newMsgs, newMsg)
 					}
 				}
-				if newCount > 0 {
-					var notifyText string
-					if newCount == 1 {
-						notifyText = "1 new message"
+				if len(newMsgs) > 0 {
+					var statusText, notifyText string
+					if len(newMsgs) == 1 {
+						from := newMsgs[0].From
+						if idx := strings.Index(from, "<"); idx > 1 {
+							from = strings.TrimSpace(from[:idx])
+						}
+						statusText = fmt.Sprintf("New from %s", from)
+						notifyText = fmt.Sprintf("%s — %s", from, newMsgs[0].Subject)
 					} else {
-						notifyText = fmt.Sprintf("%d new messages", newCount)
+						statusText = fmt.Sprintf("%d new messages", len(newMsgs))
+						from := newMsgs[0].From
+						if idx := strings.Index(from, "<"); idx > 1 {
+							from = strings.TrimSpace(from[:idx])
+						}
+						notifyText = fmt.Sprintf("%d new — %s: %s", len(newMsgs), from, newMsgs[0].Subject)
 					}
-					m.status = notifyText
-					// OSC 9 desktop notification (Ghostty, iTerm2, etc.) + BEL fallback
-					cmds = append(cmds, tea.Printf("\x1b]9;mailmd: %s\x1b\\\a", notifyText))
+					m.status = statusText
+					// OSC 9 desktop notification (Ghostty, iTerm2, etc.)
+					cmds = append(cmds, func() tea.Msg {
+						fmt.Fprintf(os.Stderr, "\x1b]9;%s\a", notifyText)
+						return nil
+					})
 				}
 			}
 			// Track inbox IDs
