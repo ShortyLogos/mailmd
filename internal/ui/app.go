@@ -379,6 +379,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.persistLastAccount(msg.email)
 
 		// Size the new inbox and start fetching
+		a.active.inbox.SetStatus("Switched to " + msg.name)
 		sizeCmd := func() tea.Msg { return tea.WindowSizeMsg{Width: a.width, Height: a.height} }
 		return a, tea.Batch(a.active.inbox.Init(), sizeCmd)
 
@@ -1107,14 +1108,16 @@ func (a App) switchToAccount(acct config.Account) (tea.Model, tea.Cmd) {
 		if !a.initted[acct.Email] {
 			a.initted[acct.Email] = true
 			sizeCmd := func() tea.Msg { return tea.WindowSizeMsg{Width: a.width, Height: a.height} }
+			a.active.inbox.SetStatus("Switched to " + acct.Name)
 			return a, tea.Batch(a.active.inbox.Init(), sizeCmd)
 		}
-		return a, a.active.inbox.SpinnerTick()
+		a.active.inbox.SetStatus("Switched to " + acct.Name)
+		return a, nil
 	}
 
 	// Not cached — authenticate and create state
 	a.showSwitcher = false
-	a.active.inbox.SetLoadingStatus("Switching to " + acct.Name + "...")
+	a.active.inbox.SetStatus("Switching to " + acct.Name + "...")
 	tokenPath := auth.AccountTokenPath(a.configDir, acct.Email)
 	store := auth.NewTokenStore(tokenPath)
 
