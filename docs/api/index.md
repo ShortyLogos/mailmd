@@ -1,1 +1,1 @@
-- [cli-subcommands.md](cli-subcommands.md) — `compose`, `draft`, and `help` subcommands for scripting and LLM integration
+- [cli-subcommands.md](cli-subcommands.md) — `compose`, `draft`, and `help` subcommands for scripting and LLM integration; `-a`/`--account` flag for account selection

@@ -50,7 +50,16 @@ func run() error {
 			return nil
 		}
 	}
-	return runTUI(nil)
+
+	// Parse TUI flags
+	var account string
+	fs := flag.NewFlagSet("mailmd", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fs.StringVar(&account, "account", "", "Account to use (by email or name)")
+	fs.StringVar(&account, "a", "", "Account to use (shorthand)")
+	fs.Parse(os.Args[1:])
+
+	return runTUI(nil, account) // nil = no initial compose message
 }
 
 func printHelp(topic string) {
@@ -261,10 +270,14 @@ OTHER SETTINGS
 
 Usage:
   mailmd                Open the TUI email client
+  mailmd [--account <name>]  Open TUI with specific account
   mailmd compose        Open TUI with compose dialog pre-filled
   mailmd draft          Create a Gmail draft and exit (no TUI)
   mailmd version        Print version
   mailmd help [topic]   Show help
+
+Flags:
+  -a, --account <name>    Account to use (by email or name from config)
 
 Topics:
   compose       Compose command flags and examples
@@ -274,6 +287,8 @@ Topics:
 
 Examples:
   mailmd
+  mailmd --account personal
+  mailmd --account work@company.com
   mailmd compose --to alice@example.com --subject "Hello" --body-file draft.md
   mailmd draft --to bob@example.com --subject "Report" --body-file report.md
   echo "Hello" | mailmd draft --to alice@example.com --subject "Hi"
@@ -326,8 +341,46 @@ func parseComposeFlags(args []string) (to, cc repeatable, subject, body string, 
 	return to, cc, subject, body, nil
 }
 
+func parseComposeFlagsWithAccount(args []string) (to, cc repeatable, subject, body, account string, err error) {
+	fs := flag.NewFlagSet("compose", flag.ContinueOnError)
+	fs.SetOutput(io.Discard) // suppress default flag error output
+	fs.Var(&to, "to", "Recipient email (repeatable)")
+	fs.Var(&cc, "cc", "CC recipient (repeatable)")
+	fs.StringVar(&subject, "subject", "", "Email subject")
+	fs.StringVar(&body, "body", "", "Body text (Markdown)")
+	fs.StringVar(&account, "account", "", "Account to use (by email or name)")
+	fs.StringVar(&account, "a", "", "Account to use (shorthand)")
+	var bodyFile string
+	fs.StringVar(&bodyFile, "body-file", "", "Path to Markdown file for body")
+
+	if err := fs.Parse(args); err != nil {
+		return nil, nil, "", "", "", err
+	}
+
+	// Read body from file if specified
+	if bodyFile != "" && body == "" {
+		data, err := os.ReadFile(bodyFile)
+		if err != nil {
+			return nil, nil, "", "", "", fmt.Errorf("reading body file: %w", err)
+		}
+		body = string(data)
+	}
+
+	// Read body from stdin if piped and no body given
+	if body == "" {
+		if info, err := os.Stdin.Stat(); err == nil && (info.Mode()&os.ModeCharDevice) == 0 {
+			data, err := io.ReadAll(os.Stdin)
+			if err == nil && len(data) > 0 {
+				body = string(data)
+			}
+		}
+	}
+
+	return to, cc, subject, body, account, nil
+}
+
 func runCompose(args []string) error {
-	to, cc, subject, body, err := parseComposeFlags(args)
+	to, cc, subject, body, account, err := parseComposeFlagsWithAccount(args)
 	if err != nil {
 		return err
 	}
@@ -340,7 +393,7 @@ func runCompose(args []string) error {
 		Title:   "Compose",
 	}
 
-	return runTUI(msg)
+	return runTUI(msg, account)
 }
 
 func runDraft(args []string) error {
@@ -371,11 +424,11 @@ func runDraft(args []string) error {
 			Subject: subject,
 			Body:    body,
 			Title:   "Compose",
-		})
+		}, "")
 	}
 
 	ctx := context.Background()
-	client, _, err := initClient(ctx)
+	client, _, err := initClient(ctx, "")
 	if err != nil {
 		return err
 	}
@@ -399,9 +452,9 @@ func runDraft(args []string) error {
 	return nil
 }
 
-func runTUI(initialCompose *common.ComposeMsg) error {
+func runTUI(initialCompose *common.ComposeMsg, account string) error {
 	ctx := context.Background()
-	client, activeEmail, err := initClient(ctx)
+	client, activeEmail, err := initClient(ctx, account)
 	if err != nil {
 		return err
 	}
@@ -449,7 +502,19 @@ func oauthCreds() (string, string) {
 	return id, secret
 }
 
-func initClient(ctx context.Context) (gmail.Client, string, error) {
+func getAccountNames(accounts []config.Account) []string {
+	names := make([]string, len(accounts))
+	for i, a := range accounts {
+		if a.Name != "" {
+			names[i] = a.Name + " (" + a.Email + ")"
+		} else {
+			names[i] = a.Email
+		}
+	}
+	return names
+}
+
+func initClient(ctx context.Context, accountFilter string) (gmail.Client, string, error) {
 	id, secret := oauthCreds()
 	if id == "" || secret == "" {
 		return nil, "", fmt.Errorf("OAuth2 credentials not configured.\nSet MAILMD_CLIENT_ID and MAILMD_CLIENT_SECRET environment variables.\nSee README.md for setup instructions.")
@@ -468,7 +533,23 @@ func initClient(ctx context.Context) (gmail.Client, string, error) {
 
 	if len(cfg.Accounts) > 0 {
 		acct := cfg.Accounts[0]
-		if cfg.LastAccount != "" {
+
+		// If account filter is specified, try to find it
+		if accountFilter != "" {
+			found := false
+			for _, a := range cfg.Accounts {
+				// Match by email or account name (case-insensitive)
+				if strings.EqualFold(a.Email, accountFilter) || strings.EqualFold(a.Name, accountFilter) {
+					acct = a
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, "", fmt.Errorf("account %q not found. Available accounts: %v", accountFilter, getAccountNames(cfg.Accounts))
+			}
+		} else if cfg.LastAccount != "" {
+			// Use last account if no filter specified
 			for _, a := range cfg.Accounts {
 				if a.Email == cfg.LastAccount {
 					acct = a
@@ -476,6 +557,7 @@ func initClient(ctx context.Context) (gmail.Client, string, error) {
 				}
 			}
 		}
+
 		tokenPath := auth.AccountTokenPath(configDir, acct.Email)
 		store := auth.NewTokenStore(tokenPath)
 		httpClient, err := auth.Authenticate(ctx, id, secret, store)

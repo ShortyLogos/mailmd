@@ -48,6 +48,11 @@ Built with Go and the [Charm](https://charm.sh) ecosystem (Bubble Tea, Glamour, 
 - No telemetry, no analytics, no external services beyond Gmail API
 - "Bring your own credentials" option
 
+**Multi-account**
+- Multiple Gmail accounts with in-app switcher (`S`)
+- Launch directly into an account: `mailmd -a personal` or `mailmd --account work@company.com`
+- Signatures per account with default selection
+
 ## Install
 
 ### From source
@@ -83,6 +88,25 @@ export MAILMD_CLIENT_SECRET="your-client-secret"
 
 8. Run `mailmd` — your browser opens for authentication
 9. After consent, the TUI launches with your inbox
+
+## Usage
+
+```bash
+mailmd                              # open with last-used account
+mailmd -a personal                  # open with account by name
+mailmd --account work@company.com   # open with account by email
+mailmd compose --to alice@example.com --subject "Hello"
+mailmd draft --to bob@example.com --subject "Report" --body-file report.md
+echo "Hello" | mailmd draft --to alice@example.com --subject "Hi"
+mailmd help                         # show all commands
+mailmd help keys                    # keybindings reference
+```
+
+The `-a` / `--account` flag works with `compose` too:
+
+```bash
+mailmd compose -a work --to team@company.com --subject "Update"
+```
 
 ## Keybindings
 
