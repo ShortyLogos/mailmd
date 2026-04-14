@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"html"
+	"net/mail"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -891,6 +892,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				}
 			}
 
+		case key.Matches(msg, common.Keys.ReplyAll):
+			if m.message != nil {
+				msg := m.message
+				to, cc := gatherReplyAllRecipients(msg, m.accountEmail)
+				quotedBody := quoteBody(msg.Body)
+				return m, func() tea.Msg {
+					return common.ComposeMsg{
+						To:        to,
+						CC:        cc,
+						Subject:   "Re: " + msg.Subject,
+						Body:      quotedBody,
+						ThreadID:  msg.ThreadID,
+						InReplyTo: msg.MessageID,
+						Title:     "Reply All",
+					}
+				}
+			}
+
 		case key.Matches(msg, common.Keys.Forward):
 			if m.message != nil {
 				msg := m.message
@@ -1038,7 +1057,7 @@ func (m Model) View() string {
 	b.WriteString(m.viewport.View() + "\n")
 
 	// Status bar
-	status := " esc=back  r=reply  f=forward  d=trash  P=browser  j/k=scroll  K=keys  q=quit"
+	status := " esc=back  r=reply  R=reply all  f=forward  d=trash  P=browser  j/k=scroll  K=keys  q=quit"
 	if m.linkJumping {
 		hints := ""
 		if len(m.links) > 0 {
@@ -1059,7 +1078,7 @@ func (m Model) View() string {
 		if m.currentFolder() == "Drafts" {
 			status = " esc=back  e=edit  y=send  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 		} else {
-			status = " esc=back  r=reply  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
+			status = " esc=back  r=reply  R=reply all  f=forward  d=trash  P=browser" + extras + "  j/k=scroll  K=keys  q=quit"
 		}
 	}
 	status += fmt.Sprintf("  [%d%%]", int(m.viewport.ScrollPercent()*100))
@@ -1206,6 +1225,55 @@ func formatSize(bytes int64) string {
 		return fmt.Sprintf("%.1f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.1f MB", float64(bytes)/(1024*1024))
+}
+
+func gatherReplyAllRecipients(msg *gmail.Message, currentEmail string) (to, cc []string) {
+	currentLower := strings.ToLower(currentEmail)
+	seen := make(map[string]bool)
+	seen[currentLower] = true // exclude self
+
+	tryAdd := func(addr string) (string, bool) {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			return "", false
+		}
+		bare := addr
+		if parsed, err := mail.ParseAddress(addr); err == nil {
+			bare = parsed.Address
+		}
+		key := strings.ToLower(bare)
+		if key == "" || seen[key] {
+			return "", false
+		}
+		seen[key] = true
+		return addr, true
+	}
+
+	// From → To (original sender goes first)
+	if addr, ok := tryAdd(msg.From); ok {
+		to = append(to, addr)
+	}
+
+	// Original To → To
+	for _, part := range strings.Split(msg.To, ",") {
+		if addr, ok := tryAdd(part); ok {
+			to = append(to, addr)
+		}
+	}
+
+	// Original CC → CC
+	for _, part := range strings.Split(msg.CC, ",") {
+		if addr, ok := tryAdd(part); ok {
+			cc = append(cc, addr)
+		}
+	}
+
+	// Fallback: ensure at least one recipient
+	if len(to) == 0 && len(cc) == 0 {
+		to = []string{msg.From}
+	}
+
+	return to, cc
 }
 
 func quoteBody(body string) string {
