@@ -31,6 +31,13 @@ var defaultFolders = []folder{
 	{name: "Trash", labelID: "TRASH"},
 }
 
+// systemLabels are Gmail built-in labels shown in the label picker's system section.
+var systemLabels = []folder{
+	{name: "Inbox", labelID: "INBOX"},
+	{name: "Important", labelID: "IMPORTANT"},
+	{name: "Starred", labelID: "STARRED"},
+}
+
 // messagesLoadedMsg carries the result of fetching messages.
 type messagesLoadedMsg struct {
 	messages      []gmail.MessageSummary
@@ -139,6 +146,7 @@ type Model struct {
 	width       int
 	height      int
 	tabIdx      int
+	prevTabIdx  int                    // folder before entering a label folder (for ESC-back)
 	cache       map[int]*folderCache // per-folder cache keyed by tabIdx
 	syncing       bool                 // true when fetching in background
 	err           string
@@ -158,8 +166,10 @@ type Model struct {
 	labelPickerMode    int // 0 = browse folder, 1 = tag messages, 2 = move
 	labelPickerTagIDs  []string // message IDs to tag (mode 1/2)
 	labelPickerInput   textinput.Model
-	labelPickerCursor  int
-	labelPickerFiltered []int // indices into customLabels
+	labelPickerCursor    int
+	labelPickerCursors   [2]int // saved cursor per section (0=user, 1=system)
+	labelPickerFiltered  []int  // indices into active label list (custom or system)
+	labelPickerSection   int    // 0 = user labels, 1 = system labels
 	labelRenaming      bool   // true when editing a label name inline
 	labelRenameInput   textinput.Model
 
@@ -895,6 +905,9 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 		} else {
 			m.folders = append(m.folders, newFolder)
 		}
+		if m.tabIdx < len(defaultFolders) {
+			m.prevTabIdx = m.tabIdx
+		}
 		m.tabIdx = labelSlot
 		delete(m.cache, labelSlot)
 		m.searchQuery = ""
@@ -906,11 +919,11 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 	case labelsLoadedMsg:
 		if msg.err == nil {
 			// User-created labels have IDs starting with "Label_".
-			// We also include STARRED and IMPORTANT since they're useful
-			// but don't need a permanent tab.
+			// System labels (INBOX, STARRED, IMPORTANT) are in the separate
+			// systemLabels slice shown in the picker's second section.
 			m.customLabels = nil
 			for _, l := range msg.labels {
-				if strings.HasPrefix(l.ID, "Label_") || l.ID == "STARRED" || l.ID == "IMPORTANT" {
+				if strings.HasPrefix(l.ID, "Label_") {
 					m.customLabels = append(m.customLabels, folder{name: l.Name, labelID: l.ID})
 				}
 			}
@@ -1065,23 +1078,24 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				return m, nil
 
 			case key.Matches(msg, common.Keys.NextTab):
-				// Create new label from typed text
-				name := strings.TrimSpace(m.labelPickerInput.Value())
-				if name != "" {
-					mode := m.labelPickerMode
-					ids := m.labelPickerTagIDs
-					m.showLabelPicker = false
-					m.status = fmt.Sprintf("Creating label \"%s\"...", name)
-					return m, func() tea.Msg {
-						label, err := m.client.CreateLabel(m.ctx, name)
-						return labelCreatedMsg{label: label, err: err, mode: mode, ids: ids}
-					}
+				// TAB: toggle between user labels and system labels sections
+				m.labelPickerCursors[m.labelPickerSection] = m.labelPickerCursor
+				if m.labelPickerSection == 0 {
+					m.labelPickerSection = 1
+				} else {
+					m.labelPickerSection = 0
+				}
+				m.labelPickerFiltered = filterLabels(m.pickerLabels(), m.labelPickerInput.Value())
+				m.labelPickerCursor = m.labelPickerCursors[m.labelPickerSection]
+				if m.labelPickerCursor >= len(m.labelPickerFiltered) {
+					m.labelPickerCursor = 0
 				}
 				return m, nil
 
 			case key.Matches(msg, key.NewBinding(key.WithKeys("enter"))):
+				activeLabels := m.pickerLabels()
 				if len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
-					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+					chosen := activeLabels[m.labelPickerFiltered[m.labelPickerCursor]]
 					m.showLabelPicker = false
 
 					if m.labelPickerMode == 1 || m.labelPickerMode == 2 {
@@ -1121,12 +1135,29 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 					} else {
 						m.folders = append(m.folders, chosen)
 					}
+					if m.tabIdx < len(defaultFolders) {
+						m.prevTabIdx = m.tabIdx
+					}
 					m.tabIdx = labelSlot
 					delete(m.cache, labelSlot)
 					m.searchQuery = ""
 					m.searchCache = nil
 					m.syncing = true
 					return m, m.fetchMessages()
+				}
+				// No match in list — create new label from typed text (user section only)
+				if m.labelPickerSection == 0 {
+					name := strings.TrimSpace(m.labelPickerInput.Value())
+					if name != "" {
+						mode := m.labelPickerMode
+						ids := m.labelPickerTagIDs
+						m.showLabelPicker = false
+						m.status = fmt.Sprintf("Creating label \"%s\"...", name)
+						return m, func() tea.Msg {
+							label, err := m.client.CreateLabel(m.ctx, name)
+							return labelCreatedMsg{label: label, err: err, mode: mode, ids: ids}
+						}
+					}
 				}
 				return m, nil
 
@@ -1144,10 +1175,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+d"))):
 				// Delete selected label (user-created only)
-				if m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+				if m.labelPickerSection == 0 && m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
 					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
 					if !strings.HasPrefix(chosen.labelID, "Label_") {
-						return m, nil // can't delete system labels
+						return m, nil
 					}
 					m.showLabelPicker = false
 					m.status = fmt.Sprintf("Deleting label \"%s\"...", chosen.name)
@@ -1160,10 +1191,10 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 
 			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+r"))):
 				// Rename selected label (user-created only)
-				if m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+				if m.labelPickerSection == 0 && m.labelPickerMode == 0 && len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
 					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
 					if !strings.HasPrefix(chosen.labelID, "Label_") {
-						return m, nil // can't rename system labels
+						return m, nil
 					}
 					m.labelRenaming = true
 					m.labelRenameInput.SetValue(chosen.name)
@@ -1175,7 +1206,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			default:
 				var cmd tea.Cmd
 				m.labelPickerInput, cmd = m.labelPickerInput.Update(msg)
-				m.labelPickerFiltered = filterLabels(m.customLabels, m.labelPickerInput.Value())
+				m.labelPickerFiltered = filterLabels(m.pickerLabels(), m.labelPickerInput.Value())
 				if m.labelPickerCursor >= len(m.labelPickerFiltered) {
 					m.labelPickerCursor = 0
 				}
@@ -1254,7 +1285,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			return m, textinput.Blink
 
 		case key.Matches(msg, common.Keys.Back):
-			// Esc: clear selection first, then search
+			// Esc: clear selection first, then search, then leave label folder
 			if len(fc.selected) > 0 {
 				fc.selected = make(map[string]bool)
 				return m, nil
@@ -1264,6 +1295,17 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.searchCache = nil
 				m.searchInput.SetValue("")
 				return m, nil
+			}
+			// Leave label folder → return to previous folder
+			if m.tabIdx >= len(defaultFolders) {
+				m.tabIdx = m.prevTabIdx
+				if len(m.folders) > len(defaultFolders) {
+					m.folders = m.folders[:len(defaultFolders)]
+				}
+				m.searchQuery = ""
+				m.searchCache = nil
+				m.syncing = true
+				return m, m.fetchMessages()
 			}
 
 		case key.Matches(msg, common.Keys.Open):
@@ -1430,43 +1472,40 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 			}
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("L"))):
-			if len(m.customLabels) > 0 {
-				m.showLabelPicker = true
-				m.labelPickerMode = 0
-				m.labelPickerInput.SetValue("")
-				m.labelPickerInput.Focus()
-				m.labelPickerCursor = 0
-				m.labelPickerFiltered = filterLabels(m.customLabels, "")
-			}
+			m.showLabelPicker = true
+			m.labelPickerMode = 0
+			m.labelPickerSection = 0
+			m.labelPickerInput.SetValue("")
+			m.labelPickerInput.Focus()
+			m.labelPickerCursor = 0
+			m.labelPickerFiltered = filterLabels(m.pickerLabels(), "")
 			return m, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("t"))):
-			if len(m.customLabels) > 0 {
-				ids, _ := m.selectedOrCursor(fc)
-				if len(ids) > 0 {
-					m.showLabelPicker = true
-					m.labelPickerMode = 1
-					m.labelPickerTagIDs = ids
-					m.labelPickerInput.SetValue("")
-					m.labelPickerInput.Focus()
-					m.labelPickerCursor = 0
-					m.labelPickerFiltered = filterLabels(m.customLabels, "")
-				}
+			ids, _ := m.selectedOrCursor(fc)
+			if len(ids) > 0 {
+				m.showLabelPicker = true
+				m.labelPickerMode = 1
+				m.labelPickerSection = 0
+				m.labelPickerTagIDs = ids
+				m.labelPickerInput.SetValue("")
+				m.labelPickerInput.Focus()
+				m.labelPickerCursor = 0
+				m.labelPickerFiltered = filterLabels(m.pickerLabels(), "")
 			}
 			return m, nil
 
 		case key.Matches(msg, key.NewBinding(key.WithKeys("T"))):
-			if len(m.customLabels) > 0 {
-				ids, _ := m.selectedOrCursor(fc)
-				if len(ids) > 0 {
-					m.showLabelPicker = true
-					m.labelPickerMode = 2 // move = tag + archive
-					m.labelPickerTagIDs = ids
-					m.labelPickerInput.SetValue("")
-					m.labelPickerInput.Focus()
-					m.labelPickerCursor = 0
-					m.labelPickerFiltered = filterLabels(m.customLabels, "")
-				}
+			ids, _ := m.selectedOrCursor(fc)
+			if len(ids) > 0 {
+				m.showLabelPicker = true
+				m.labelPickerMode = 2 // move = tag + archive
+				m.labelPickerSection = 0
+				m.labelPickerTagIDs = ids
+				m.labelPickerInput.SetValue("")
+				m.labelPickerInput.Focus()
+				m.labelPickerCursor = 0
+				m.labelPickerFiltered = filterLabels(m.pickerLabels(), "")
 			}
 			return m, nil
 
@@ -1572,6 +1611,14 @@ func (m Model) keybindsForFolder(fc *folderCache) string {
 		}
 		return base + extra + markHint + suffix
 	}
+}
+
+// pickerLabels returns the label list for the active picker section.
+func (m Model) pickerLabels() []folder {
+	if m.labelPickerSection == 1 {
+		return systemLabels
+	}
+	return m.customLabels
 }
 
 func filterLabels(labels []folder, query string) []int {
@@ -1864,7 +1911,7 @@ func (m Model) View() string {
 
 func (m Model) renderLabelPickerOverlay(base string) string {
 	innerWidth := 44
-	maxItems := 10
+	maxItems := 8
 	var lines []string
 
 	titleText := "Labels"
@@ -1882,40 +1929,34 @@ func (m Model) renderLabelPickerOverlay(base string) string {
 
 	highlight := lipgloss.NewStyle().Bold(true).Foreground(common.White).Background(common.Primary)
 	muted := lipgloss.NewStyle().Foreground(common.Muted)
+	dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
 	arrowStyle := lipgloss.NewStyle().Foreground(common.Secondary)
+	sectionHeader := lipgloss.NewStyle().Bold(true).Foreground(common.Secondary)
 
-	total := len(m.labelPickerFiltered)
-	if total == 0 {
+	// --- User Labels section ---
+	userFiltered := filterLabels(m.customLabels, m.labelPickerInput.Value())
+	if len(userFiltered) == 0 {
 		lines = append(lines, muted.Render("  (no matching labels)"))
 	} else {
-		// Compute visible window centered on cursor
-		start := m.labelPickerCursor - maxItems/2
-		if start < 0 {
-			start = 0
-		}
-		end := start + maxItems
-		if end > total {
-			end = total
-			start = end - maxItems
-			if start < 0 {
-				start = 0
-			}
-		}
+		m.renderUserLabels(&lines, m.customLabels, userFiltered, maxItems, innerWidth, highlight, muted, dim, arrowStyle)
+	}
 
-		if start > 0 {
-			lines = append(lines, arrowStyle.Render("  ▲ more"))
+	// --- Separator ---
+	sep := strings.Repeat("─", innerWidth)
+	lines = append(lines, dim.Render(sep))
+
+	// --- System Labels section ---
+	if m.labelPickerSection == 1 {
+		sysFiltered := filterLabels(systemLabels, m.labelPickerInput.Value())
+		lines = append(lines, sectionHeader.Render("  System"))
+		lines = append(lines, "")
+		if len(sysFiltered) == 0 {
+			lines = append(lines, muted.Render("  (no matching labels)"))
+		} else {
+			m.renderSystemLabels(&lines, systemLabels, sysFiltered, innerWidth, highlight, muted)
 		}
-		for i := start; i < end; i++ {
-			label := m.customLabels[m.labelPickerFiltered[i]].name
-			if i == m.labelPickerCursor {
-				lines = append(lines, highlight.Render(runewidthPadRight("  "+label, innerWidth)))
-			} else {
-				lines = append(lines, "  "+muted.Render(label))
-			}
-		}
-		if end < total {
-			lines = append(lines, arrowStyle.Render("  ▼ more"))
-		}
+	} else {
+		lines = append(lines, dim.Render("  System"))
 	}
 
 	// Rename input (shown inline below the list when active)
@@ -1932,21 +1973,23 @@ func (m Model) renderLabelPickerOverlay(base string) string {
 	} else {
 		switch m.labelPickerMode {
 		case 1:
-			lines = append(lines, help.Render("enter=apply  tab=new  esc=cancel"))
+			lines = append(lines, help.Render("enter=apply  tab=section  esc=cancel"))
 		case 2:
-			lines = append(lines, help.Render("enter=move  tab=new  esc=cancel"))
+			lines = append(lines, help.Render("enter=move  tab=section  esc=cancel"))
 		default:
-			// Dim rename/delete hints for system labels (STARRED, IMPORTANT)
-			canEdit := true
-			if len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
-				chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
-				canEdit = strings.HasPrefix(chosen.labelID, "Label_")
-			}
-			if canEdit {
-				lines = append(lines, help.Render("enter=open  tab=new  ^r=rename  ^d=delete  esc=cancel"))
+			if m.labelPickerSection == 0 {
+				canEdit := true
+				if len(m.labelPickerFiltered) > 0 && m.labelPickerCursor >= 0 && m.labelPickerCursor < len(m.labelPickerFiltered) {
+					chosen := m.customLabels[m.labelPickerFiltered[m.labelPickerCursor]]
+					canEdit = strings.HasPrefix(chosen.labelID, "Label_")
+				}
+				if canEdit {
+					lines = append(lines, help.Render("enter=open  tab=section  ^r=rename  ^d=delete  esc=cancel"))
+				} else {
+					lines = append(lines, help.Render("enter=open  tab=section  ")+dim.Render("^r=rename  ^d=delete")+help.Render("  esc=cancel"))
+				}
 			} else {
-				dim := lipgloss.NewStyle().Foreground(lipgloss.Color("#4B5563"))
-				lines = append(lines, help.Render("enter=open  tab=new  ")+dim.Render("^r=rename  ^d=delete")+help.Render("  esc=cancel"))
+				lines = append(lines, help.Render("enter=open  tab=section  esc=cancel"))
 			}
 		}
 	}
@@ -1963,6 +2006,60 @@ func (m Model) renderLabelPickerOverlay(base string) string {
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box,
 		lipgloss.WithWhitespaceChars(" "),
 		lipgloss.WithWhitespaceForeground(lipgloss.Color("#1F2937")))
+}
+
+// renderUserLabels renders the user labels section with windowed scrolling.
+// When the section is active the cursor is highlighted; when inactive items are dimmed.
+func (m Model) renderUserLabels(lines *[]string, labels []folder, filtered []int, maxItems, innerWidth int, highlight, muted, dim, arrowStyle lipgloss.Style) {
+	total := len(filtered)
+	isActive := m.labelPickerSection == 0
+
+	// Windowed view — always crop to maxItems
+	cursor := 0
+	if isActive {
+		cursor = m.labelPickerCursor
+	}
+	start := cursor - maxItems/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + maxItems
+	if end > total {
+		end = total
+		start = end - maxItems
+		if start < 0 {
+			start = 0
+		}
+	}
+
+	if start > 0 {
+		*lines = append(*lines, arrowStyle.Render("  ▲ more"))
+	}
+	for i := start; i < end; i++ {
+		label := labels[filtered[i]].name
+		if isActive && i == m.labelPickerCursor {
+			*lines = append(*lines, highlight.Render(runewidthPadRight("  "+label, innerWidth)))
+		} else if isActive {
+			*lines = append(*lines, "  "+muted.Render(label))
+		} else {
+			*lines = append(*lines, "  "+dim.Render(label))
+		}
+	}
+	if end < total {
+		*lines = append(*lines, arrowStyle.Render("  ▼ more"))
+	}
+}
+
+// renderSystemLabels renders the system labels section with cursor highlighting.
+func (m Model) renderSystemLabels(lines *[]string, labels []folder, filtered []int, innerWidth int, highlight, muted lipgloss.Style) {
+	for i, idx := range filtered {
+		label := labels[idx].name
+		if i == m.labelPickerCursor {
+			*lines = append(*lines, highlight.Render(runewidthPadRight("  "+label, innerWidth)))
+		} else {
+			*lines = append(*lines, "  "+muted.Render(label))
+		}
+	}
 }
 
 func formatMessageLine(msg gmail.MessageSummary, width int) string {
