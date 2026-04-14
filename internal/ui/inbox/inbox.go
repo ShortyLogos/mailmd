@@ -530,6 +530,10 @@ func (m Model) CurrentLabelID() string {
 }
 
 // OptimisticRemove removes a message by ID from the active folder cache.
+func (m *Model) SkipNextPoll() {
+	m.skipNextPoll = true
+}
+
 func (m *Model) OptimisticRemove(id string) {
 	fc := m.fc()
 	for i, msg := range fc.messages {
@@ -1387,6 +1391,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				m.optimisticRemove(fc, ids)
 
 				label := m.currentLabelID()
+				m.skipNextPoll = true
 				switch label {
 				case "TRASH":
 					// Permanent delete not supported by Gmail API; ignore
@@ -1407,6 +1412,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				ids, subjects := m.selectedOrCursor(fc)
 				if len(ids) > 0 {
 					m.optimisticRemove(fc, ids)
+					m.skipNextPoll = true
 					if len(ids) == 1 {
 						m.status = fmt.Sprintf("Restoring \"%s\"...", truncate(subjects[0], 40))
 					} else {
@@ -1548,6 +1554,7 @@ func (m Model) Update(msg tea.Msg) (Model, tea.Cmd) {
 				ids, subjects := m.selectedOrCursor(fc)
 				if len(ids) > 0 {
 					m.optimisticRemove(fc, ids)
+					m.skipNextPoll = true
 					if len(ids) == 1 {
 						m.status = fmt.Sprintf("Archiving \"%s\"...", truncate(subjects[0], 40))
 					} else {

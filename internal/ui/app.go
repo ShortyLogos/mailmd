@@ -550,6 +550,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.screen = screenInbox
 		id := msg.ID
 		a.active.inbox.OptimisticRemove(id)
+		a.active.inbox.SkipNextPoll()
 		delete(a.active.msgCache, id)
 		label := a.active.inbox.CurrentLabelID()
 		if label == "TRASH" {
@@ -575,6 +576,7 @@ func (a App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.screen = screenInbox
 		id := msg.ID
 		a.active.inbox.OptimisticRemove(id)
+		a.active.inbox.SkipNextPoll()
 		delete(a.active.msgCache, id)
 		a.active.inbox.SetStatus("Archiving message...")
 		return a, tea.Batch(a.active.inbox.SpinnerTick(), func() tea.Msg {
