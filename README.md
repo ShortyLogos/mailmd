@@ -58,7 +58,7 @@ Built with Go and the [Charm](https://charm.sh) ecosystem (Bubble Tea, Glamour, 
 ### From source
 
 ```bash
-git clone https://github.com/deric/mailmd
+git clone https://github.com/youruser/mailmd
 cd mailmd
 make build
 ```
@@ -66,7 +66,7 @@ make build
 ### Homebrew
 
 ```bash
-brew install deric/tap/mailmd
+brew install youruser/tap/mailmd
 ```
 
 ## Setup
