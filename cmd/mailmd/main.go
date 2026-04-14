@@ -97,6 +97,7 @@ Flags:
   --subject <text>   Email subject line
   --body <text>      Body text in Markdown format
   --body-file <path> Path to a Markdown file for the body
+  -a, --account <id> Account to use (by email or name)
   --open             Open the TUI compose dialog instead of saving a draft
 
 Body can also be piped via stdin. Markdown is converted to HTML automatically.
@@ -305,42 +306,6 @@ func (r *repeatable) Set(v string) error {
 	return nil
 }
 
-func parseComposeFlags(args []string) (to, cc repeatable, subject, body string, err error) {
-	fs := flag.NewFlagSet("compose", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // suppress default flag error output
-	fs.Var(&to, "to", "Recipient email (repeatable)")
-	fs.Var(&cc, "cc", "CC recipient (repeatable)")
-	fs.StringVar(&subject, "subject", "", "Email subject")
-	fs.StringVar(&body, "body", "", "Body text (Markdown)")
-	var bodyFile string
-	fs.StringVar(&bodyFile, "body-file", "", "Path to Markdown file for body")
-
-	if err := fs.Parse(args); err != nil {
-		return nil, nil, "", "", err
-	}
-
-	// Read body from file if specified
-	if bodyFile != "" && body == "" {
-		data, err := os.ReadFile(bodyFile)
-		if err != nil {
-			return nil, nil, "", "", fmt.Errorf("reading body file: %w", err)
-		}
-		body = string(data)
-	}
-
-	// Read body from stdin if piped and no body given
-	if body == "" {
-		if info, err := os.Stdin.Stat(); err == nil && (info.Mode()&os.ModeCharDevice) == 0 {
-			data, err := io.ReadAll(os.Stdin)
-			if err == nil && len(data) > 0 {
-				body = string(data)
-			}
-		}
-	}
-
-	return to, cc, subject, body, nil
-}
-
 func parseComposeFlagsWithAccount(args []string) (to, cc repeatable, subject, body, account string, err error) {
 	fs := flag.NewFlagSet("compose", flag.ContinueOnError)
 	fs.SetOutput(io.Discard) // suppress default flag error output
@@ -397,7 +362,7 @@ func runCompose(args []string) error {
 }
 
 func runDraft(args []string) error {
-	// Parse --open separately before parseComposeFlags
+	// Parse --open separately before parseComposeFlagsWithAccount
 	var open bool
 	var filtered []string
 	for i := 0; i < len(args); i++ {
@@ -408,7 +373,7 @@ func runDraft(args []string) error {
 		}
 	}
 
-	to, cc, subject, body, err := parseComposeFlags(filtered)
+	to, cc, subject, body, account, err := parseComposeFlagsWithAccount(filtered)
 	if err != nil {
 		return err
 	}
@@ -424,11 +389,11 @@ func runDraft(args []string) error {
 			Subject: subject,
 			Body:    body,
 			Title:   "Compose",
-		}, "")
+		}, account)
 	}
 
 	ctx := context.Background()
-	client, _, err := initClient(ctx, "")
+	client, _, err := initClient(ctx, account)
 	if err != nil {
 		return err
 	}
