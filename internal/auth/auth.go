@@ -4,11 +4,13 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
 	"os/exec"
 	"runtime"
+	"strings"
 	"time"
 
 	"golang.org/x/oauth2"
@@ -43,8 +45,28 @@ func authenticate(ctx context.Context, clientID, clientSecret string, store *Tok
 		token, err := store.Load()
 		if err == nil {
 			cfg := NewOAuthConfig(clientID, clientSecret, "")
-			client := cfg.Client(ctx, token)
-			return client, nil
+			if token.Valid() {
+				return cfg.Client(ctx, token), nil
+			}
+			// Token is expired — refresh eagerly so we can detect a revoked
+			// refresh token here instead of letting every API call fail.
+			fresh, err := cfg.TokenSource(ctx, token).Token()
+			if err == nil {
+				if fresh.AccessToken != token.AccessToken {
+					_ = store.Save(fresh)
+				}
+				return cfg.Client(ctx, fresh), nil
+			}
+			if !isInvalidGrant(err) {
+				// Transient failure (e.g. offline). Fall back to the stored
+				// token; the http client will retry the refresh lazily.
+				return cfg.Client(ctx, token), nil
+			}
+			// Refresh token revoked — wipe the stale file and re-authenticate.
+			_ = store.Delete()
+			if !silent {
+				fmt.Println("Stored credentials have been revoked — re-authenticating.")
+			}
 		}
 	}
 
@@ -130,6 +152,16 @@ func randomState() (string, error) {
 		return "", fmt.Errorf("failed to generate state: %w", err)
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// isInvalidGrant reports whether err indicates the OAuth refresh token is
+// no longer valid (expired, revoked, or otherwise rejected by the provider).
+func isInvalidGrant(err error) bool {
+	var re *oauth2.RetrieveError
+	if errors.As(err, &re) && re.ErrorCode == "invalid_grant" {
+		return true
+	}
+	return strings.Contains(err.Error(), "invalid_grant")
 }
 
 func openBrowser(url string) {

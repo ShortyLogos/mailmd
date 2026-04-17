@@ -48,6 +48,14 @@ func (s *TokenStore) Load() (*oauth2.Token, error) {
 	return &token, nil
 }
 
+func (s *TokenStore) Delete() error {
+	err := os.Remove(s.path)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete token file: %w", err)
+	}
+	return nil
+}
+
 func (s *TokenStore) Save(token *oauth2.Token) error {
 	if err := os.MkdirAll(filepath.Dir(s.path), 0700); err != nil {
 		return fmt.Errorf("failed to create token directory: %w", err)

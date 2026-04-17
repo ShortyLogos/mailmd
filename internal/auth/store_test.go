@@ -64,6 +64,30 @@ func TestLoadNonExistentFile(t *testing.T) {
 	}
 }
 
+func TestDeleteRemovesFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tokens.json")
+	store := NewTokenStore(path)
+
+	token := &oauth2.Token{AccessToken: "test", TokenType: "Bearer"}
+	if err := store.Save(token); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete(); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Errorf("expected file to be gone, stat err = %v", err)
+	}
+}
+
+func TestDeleteMissingFileIsNoError(t *testing.T) {
+	store := NewTokenStore(filepath.Join(t.TempDir(), "missing.json"))
+	if err := store.Delete(); err != nil {
+		t.Errorf("Delete on missing file: %v", err)
+	}
+}
+
 func TestSaveCreatesParentDirs(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "nested", "dir", "tokens.json")

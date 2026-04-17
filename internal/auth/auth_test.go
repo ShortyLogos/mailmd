@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -44,6 +46,27 @@ func TestCallbackServerCapturesCode(t *testing.T) {
 	code := <-codeCh
 	if code != "test-auth-code" {
 		t.Errorf("expected code 'test-auth-code', got %q", code)
+	}
+}
+
+func TestIsInvalidGrant(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"RetrieveError invalid_grant", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}, true},
+		{"RetrieveError other", &oauth2.RetrieveError{ErrorCode: "invalid_client"}, false},
+		{"wrapped RetrieveError", fmt.Errorf("token: %w", &oauth2.RetrieveError{ErrorCode: "invalid_grant"}), true},
+		{"substring fallback", errors.New(`oauth2: "invalid_grant" Token has been expired or revoked.`), true},
+		{"unrelated error", errors.New("network unreachable"), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInvalidGrant(tc.err); got != tc.want {
+				t.Errorf("isInvalidGrant(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
 
